@@ -1,0 +1,15 @@
+name: cholmodjax
+channels:
+  - conda-forge
+dependencies:
+  - python
+  - pip
+  - scipy
+  - numpy
+  - jax
+  - scikit-sparse
+  - nanobind
+  - suitesparse
+  - cmake
+  - scikit-build-core
+  - pytest
