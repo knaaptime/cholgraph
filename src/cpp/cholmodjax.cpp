@@ -93,6 +93,9 @@ static std::unordered_map<uint64_t, std::vector<std::unique_ptr<PatternEntry>>>
     g_registry;
 // Fast path: solver loops hit the same pattern every call.
 static PatternEntry* g_last_entry = nullptr;
+// Count of actual numeric (re)factorizations, for tests/introspection. Bumped
+// only when factorize_locked truly refactors (not on the value-cache skip).
+static int64_t g_num_factorizations = 0;
 
 static uint64_t fnv1a(const void* data, size_t nbytes, uint64_t h) {
   const unsigned char* p = static_cast<const unsigned char*>(data);
@@ -308,6 +311,7 @@ static bool factorize_locked(PatternEntry* e, const double* Ax, int64_t nnz,
   e->logdet = ld;
   e->factored = true;
   e->factor_epoch++;  // invalidates any cached simplicial copy (Lldl)
+  g_num_factorizations++;
   return true;
 }
 
@@ -507,6 +511,225 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(CholmodLogdetF64, LogdetF64Impl,
                                   .Attr<int64_t>("n"));
 
 // ---------------------------------------------------------------------------
+// factor-solve handler: factor A once, then apply K independent solve *chains*
+// from that single factor, plus an optional logdet.
+//
+//   args:  Ai, Aj, Ax, b_0, ..., b_{K-1}   (each b_k is (n) or (n, nrhs_k))
+//   rets:  x_0, ..., x_{K-1}[, logdet]      (x_k has the same shape as b_k)
+//   attrs: mode_chain  — all K mode sequences flattened end to end
+//          chain_lens  — length K; chain_lens[k] modes belong to b_k
+//          want_logdet — 0/1; when 1 the final ret is the scalar log|A|
+//          n           — matrix dimension (needed when K == 0)
+//
+// Each chain is applied left to right: x_k = m_last(... m_1(m_0(b_k))), where
+// each m is a CHOLMOD solve system (MODE_*). This expresses e.g. the Gibbs
+// Gaussian step from one factorization: mean = A^{-1} b via chain [MODE_A], and
+// a draw's factor part P' L^{-T} z via chain [MODE_LT, MODE_PT].
+// ---------------------------------------------------------------------------
+
+// Apply all K solve chains for one already-factored system. bptr/xptr hold the
+// K input/output row-major blocks; tmpA/tmpB are reused ping-pong scratch.
+static ffi::Error apply_solves_locked(
+    PatternEntry* e, cholmod_factor* L, int64_t n,
+    const std::vector<const double*>& bptr, const std::vector<int64_t>& nrhs,
+    const int64_t* mode_chain, const int64_t* chain_lens, int64_t K,
+    const std::vector<double*>& xptr, std::vector<double>* scratch,
+    std::vector<double>* tmpA, std::vector<double>* tmpB) {
+  int64_t coff = 0;
+  for (int64_t k = 0; k < K; ++k) {
+    int64_t len = chain_lens[k];
+    int64_t w = nrhs[k];
+    if (len == 0) {
+      // Empty chain: identity copy b_k -> x_k.
+      std::memcpy(xptr[k], bptr[k], n * w * sizeof(double));
+      continue;
+    }
+    const double* in = bptr[k];
+    for (int64_t s = 0; s < len; ++s) {
+      int64_t mode = mode_chain[coff + s];
+      if (mode < 0 || mode > 8)
+        return ffi::Error::InvalidArgument("cholmodjax: invalid solve mode");
+      // Final step writes into the output buffer; intermediates ping-pong.
+      double* out;
+      if (s == len - 1)
+        out = xptr[k];
+      else {
+        std::vector<double>* t = (s % 2 == 0) ? tmpA : tmpB;
+        t->resize(n * w);
+        out = t->data();
+      }
+      ffi::Error r = solve_one_locked(e, L, static_cast<int>(mode), in, n, w,
+                                      out, scratch);
+      if (r.failure()) return r;
+      in = out;
+    }
+    coff += len;
+  }
+  return ffi::Error::Success();
+}
+
+static ffi::Error FactorSolveF64Impl(
+    ffi::Buffer<ffi::S32> Ai, ffi::Buffer<ffi::S32> Aj, ffi::Buffer<ffi::F64> Ax,
+    ffi::RemainingArgs rhs, ffi::RemainingRets rets,
+    ffi::Span<const int64_t> mode_chain, ffi::Span<const int64_t> chain_lens,
+    int64_t want_logdet, int64_t n) {
+  int64_t nnz = static_cast<int64_t>(Ai.element_count());
+  if (static_cast<int64_t>(Aj.element_count()) != nnz ||
+      static_cast<int64_t>(Ax.element_count()) != nnz)
+    return ffi::Error::InvalidArgument(
+        "cholmodjax: Ai, Aj, Ax must have the same length");
+  int64_t K = static_cast<int64_t>(chain_lens.size());
+  if (static_cast<int64_t>(rhs.size()) != K)
+    return ffi::Error::InvalidArgument(
+        "cholmodjax: number of right-hand sides must match chain_lens");
+  if (static_cast<int64_t>(rets.size()) != K + (want_logdet ? 1 : 0))
+    return ffi::Error::InvalidArgument(
+        "cholmodjax: number of results must match rhs count (+ logdet)");
+
+  std::vector<const double*> bptr(K);
+  std::vector<double*> xptr(K);
+  std::vector<int64_t> nrhs(K);
+  for (int64_t k = 0; k < K; ++k) {
+    auto b = rhs.get<ffi::Buffer<ffi::F64>>(k);
+    auto x = rets.get<ffi::Buffer<ffi::F64>>(k);
+    if (b.has_error()) return b.error();
+    if (x.has_error()) return x.error();
+    auto bdims = b->dimensions();
+    if (bdims.size() < 1 || bdims.size() > 2 || bdims[0] != n)
+      return ffi::Error::InvalidArgument(
+          "cholmodjax: each rhs must be (n) or (n, nrhs) with matching n");
+    bptr[k] = b->typed_data();
+    xptr[k] = (*x)->typed_data();
+    nrhs[k] = bdims.size() == 2 ? bdims[1] : 1;
+  }
+
+  std::lock_guard<std::mutex> lock(g_mutex);
+  ensure_started_locked();
+
+  std::string err;
+  PatternEntry* e =
+      get_or_create_entry_locked(Ai.typed_data(), Aj.typed_data(), nnz, n, &err);
+  if (!e) return ffi::Error::InvalidArgument(err);
+  if (!factorize_locked(e, Ax.typed_data(), nnz, &err))
+    return ffi::Error::Internal(err);
+
+  std::vector<double> scratch, tmpA, tmpB;
+  ffi::Error r = apply_solves_locked(e, e->L, n, bptr, nrhs, mode_chain.begin(),
+                                     chain_lens.begin(), K, xptr, &scratch, &tmpA,
+                                     &tmpB);
+  if (r.failure()) return r;
+
+  if (want_logdet) {
+    auto ld = rets.get<ffi::Buffer<ffi::F64>>(K);
+    if (ld.has_error()) return ld.error();
+    (*ld)->typed_data()[0] = e->logdet;
+  }
+  return ffi::Error::Success();
+}
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(CholmodFactorSolveF64, FactorSolveF64Impl,
+                              ffi::Ffi::Bind()
+                                  .Arg<ffi::Buffer<ffi::S32>>()   // Ai
+                                  .Arg<ffi::Buffer<ffi::S32>>()   // Aj
+                                  .Arg<ffi::Buffer<ffi::F64>>()   // Ax
+                                  .RemainingArgs()                // b_0..b_{K-1}
+                                  .RemainingRets()                // x_0..[,logdet]
+                                  .Attr<ffi::Span<const int64_t>>("mode_chain")
+                                  .Attr<ffi::Span<const int64_t>>("chain_lens")
+                                  .Attr<int64_t>("want_logdet")
+                                  .Attr<int64_t>("n"));
+
+// Batched factor-solve: leading axis is the batch. Ax is (B, nnz); each rhs is
+// (B, n[, nrhs_k]); results mirror that. The system is factored exactly ONCE
+// per batch element, then every chain for that element is solved from it — so a
+// vmapped multi-solve costs one factorization per element, not one per chain.
+static ffi::Error FactorSolveBatchedF64Impl(
+    ffi::Buffer<ffi::S32> Ai, ffi::Buffer<ffi::S32> Aj, ffi::Buffer<ffi::F64> Ax,
+    ffi::RemainingArgs rhs, ffi::RemainingRets rets,
+    ffi::Span<const int64_t> mode_chain, ffi::Span<const int64_t> chain_lens,
+    int64_t want_logdet, int64_t n) {
+  int64_t nnz = static_cast<int64_t>(Ai.element_count());
+  auto axdims = Ax.dimensions();
+  if (axdims.size() != 2 || axdims[1] != nnz)
+    return ffi::Error::InvalidArgument(
+        "cholmodjax: batched Ax must have shape (batch, nnz)");
+  int64_t batch = axdims[0];
+  int64_t K = static_cast<int64_t>(chain_lens.size());
+  if (static_cast<int64_t>(rhs.size()) != K)
+    return ffi::Error::InvalidArgument(
+        "cholmodjax: number of right-hand sides must match chain_lens");
+  if (static_cast<int64_t>(rets.size()) != K + (want_logdet ? 1 : 0))
+    return ffi::Error::InvalidArgument(
+        "cholmodjax: number of results must match rhs count (+ logdet)");
+
+  // Per-rhs element strides and per-batch base pointers.
+  std::vector<const double*> bbase(K);
+  std::vector<double*> xbase(K);
+  std::vector<int64_t> nrhs(K), bstride(K);
+  for (int64_t k = 0; k < K; ++k) {
+    auto b = rhs.get<ffi::Buffer<ffi::F64>>(k);
+    auto x = rets.get<ffi::Buffer<ffi::F64>>(k);
+    if (b.has_error()) return b.error();
+    if (x.has_error()) return x.error();
+    auto bdims = b->dimensions();
+    if (bdims.size() < 2 || bdims.size() > 3 || bdims[0] != batch ||
+        bdims[1] != n)
+      return ffi::Error::InvalidArgument(
+          "cholmodjax: each batched rhs must be (batch, n[, nrhs])");
+    nrhs[k] = bdims.size() == 3 ? bdims[2] : 1;
+    bstride[k] = n * nrhs[k];
+    bbase[k] = b->typed_data();
+    xbase[k] = (*x)->typed_data();
+  }
+  double* ldbase = nullptr;
+  if (want_logdet) {
+    auto ld = rets.get<ffi::Buffer<ffi::F64>>(K);
+    if (ld.has_error()) return ld.error();
+    ldbase = (*ld)->typed_data();
+  }
+
+  std::lock_guard<std::mutex> lock(g_mutex);
+  ensure_started_locked();
+
+  std::string err;
+  PatternEntry* e =
+      get_or_create_entry_locked(Ai.typed_data(), Aj.typed_data(), nnz, n, &err);
+  if (!e) return ffi::Error::InvalidArgument(err);
+
+  const double* Axd = Ax.typed_data();
+  std::vector<double> scratch, tmpA, tmpB;
+  std::vector<const double*> bptr(K);
+  std::vector<double*> xptr(K);
+  for (int64_t s = 0; s < batch; ++s) {
+    if (!factorize_locked(e, Axd + s * nnz, nnz, &err))
+      return ffi::Error::Internal(err);
+    for (int64_t k = 0; k < K; ++k) {
+      bptr[k] = bbase[k] + s * bstride[k];
+      xptr[k] = xbase[k] + s * bstride[k];
+    }
+    ffi::Error r =
+        apply_solves_locked(e, e->L, n, bptr, nrhs, mode_chain.begin(),
+                            chain_lens.begin(), K, xptr, &scratch, &tmpA, &tmpB);
+    if (r.failure()) return r;
+    if (want_logdet) ldbase[s] = e->logdet;
+  }
+  return ffi::Error::Success();
+}
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(CholmodFactorSolveBatchedF64,
+                              FactorSolveBatchedF64Impl,
+                              ffi::Ffi::Bind()
+                                  .Arg<ffi::Buffer<ffi::S32>>()   // Ai
+                                  .Arg<ffi::Buffer<ffi::S32>>()   // Aj
+                                  .Arg<ffi::Buffer<ffi::F64>>()   // Ax [B,nnz]
+                                  .RemainingArgs()                // b_0..b_{K-1}
+                                  .RemainingRets()                // x_0..[,logdet]
+                                  .Attr<ffi::Span<const int64_t>>("mode_chain")
+                                  .Attr<ffi::Span<const int64_t>>("chain_lens")
+                                  .Attr<int64_t>("want_logdet")
+                                  .Attr<int64_t>("n"));
+
+// ---------------------------------------------------------------------------
 // updown-solve handler:  (Ai, Aj, Ax, C[n,k], b[n(,nrhs)]; mode, downdate)
 //     -> x solving (A ± C C') x = b, and out_logdet = log|A ± C C'|.
 //
@@ -652,6 +875,18 @@ NB_MODULE(cholmodjax_cpp, m) {
   });
   m.def("updown_solve_f64_capsule", []() {
     return nb::capsule(reinterpret_cast<void*>(CholmodUpdownSolveF64));
+  });
+  m.def("factor_solve_f64_capsule", []() {
+    return nb::capsule(reinterpret_cast<void*>(CholmodFactorSolveF64));
+  });
+  m.def("factor_solve_batched_f64_capsule", []() {
+    return nb::capsule(reinterpret_cast<void*>(CholmodFactorSolveBatchedF64));
+  });
+
+  // Total numeric (re)factorizations performed, for tests/introspection.
+  m.def("factorization_count", []() {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    return g_num_factorizations;
   });
 
   m.def("clear_cache", []() {

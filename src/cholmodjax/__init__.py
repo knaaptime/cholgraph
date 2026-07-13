@@ -38,16 +38,19 @@ import numpy as np
 
 import cholmodjax_cpp as _cpp
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 __all__ = [
     "solve",
     "logdet",
+    "factor_solve",
+    "sample_gaussian",
     "update_solve",
     "solve_bcoo",
     "logdet_bcoo",
     "update_solve_bcoo",
     "clear_cache",
     "cache_size",
+    "factorization_count",
     "set_options",
     "MODE_A",
     "MODE_LDLT",
@@ -74,6 +77,16 @@ jax.ffi.register_ffi_target(
 jax.ffi.register_ffi_target(
     "cholmodjax_updown_solve_f64",
     _cpp.updown_solve_f64_capsule(),
+    platform="cpu",
+)
+jax.ffi.register_ffi_target(
+    "cholmodjax_factor_solve_f64",
+    _cpp.factor_solve_f64_capsule(),
+    platform="cpu",
+)
+jax.ffi.register_ffi_target(
+    "cholmodjax_factor_solve_batched_f64",
+    _cpp.factor_solve_batched_f64_capsule(),
     platform="cpu",
 )
 
@@ -237,6 +250,162 @@ def logdet(Ai, Aj, Ax, n):
     return call(Ai, Aj, Ax, n=np.int64(n))
 
 
+# factor_solve dispatchers, cached by (mode_chain, chain_lens, want_logdet, n).
+_FS_DISPATCH = {}
+
+
+def _make_factor_solve_dispatch(mode_chain, chain_lens, want_logdet, n):
+    mc = np.asarray(mode_chain, np.int64)
+    cl = np.asarray(chain_lens, np.int64)
+    wl = np.int64(1 if want_logdet else 0)
+    nn = np.int64(n)
+
+    def _out_shapes(bs, batch=None):
+        shapes = [jax.ShapeDtypeStruct(b.shape, b.dtype) for b in bs]
+        if want_logdet:
+            ld_shape = () if batch is None else (batch,)
+            shapes.append(jax.ShapeDtypeStruct(ld_shape, jnp.float64))
+        return shapes
+
+    def _unbatched(Ai, Aj, Ax, bs):
+        call = jax.ffi.ffi_call("cholmodjax_factor_solve_f64", _out_shapes(bs))
+        return tuple(
+            call(Ai, Aj, Ax, *bs, mode_chain=mc, chain_lens=cl,
+                 want_logdet=wl, n=nn)
+        )
+
+    dispatch = jax.custom_batching.custom_vmap(_unbatched)
+
+    @dispatch.def_vmap
+    def _rule(axis_size, in_batched, Ai, Aj, Ax, bs):
+        Ai_b, Aj_b, Ax_b, bs_b = in_batched
+        if Ai_b or Aj_b:
+            raise ValueError(
+                "cholmodjax.factor_solve: cannot vmap over the sparsity "
+                "pattern (Ai, Aj) — it must be shared across the batch"
+            )
+        if not Ax_b:
+            Ax = jnp.broadcast_to(Ax, (axis_size,) + Ax.shape)
+        bs = tuple(
+            b if bb else jnp.broadcast_to(b, (axis_size,) + b.shape)
+            for b, bb in zip(bs, bs_b)
+        )
+        call = jax.ffi.ffi_call(
+            "cholmodjax_factor_solve_batched_f64", _out_shapes(bs, axis_size)
+        )
+        outs = tuple(
+            call(Ai, Aj, Ax, *bs, mode_chain=mc, chain_lens=cl,
+                 want_logdet=wl, n=nn)
+        )
+        return outs, (True,) * len(outs)
+
+    return dispatch
+
+
+def factor_solve(Ai, Aj, Ax, rhs, want_logdet=False, n=None):
+    """Factor ``A`` once, then run several solve *chains* from that one factor.
+
+    This is the "factor once, do everything" primitive: ``A`` (the COO matrix)
+    is factored a single time and every requested solve — plus an optional
+    ``logdet`` — is served from that factor. Under ``jax.vmap`` it lowers to one
+    batched FFI call that factors **once per batch element** regardless of how
+    many chains are requested, which is the key win for Gibbs sweeps that
+    otherwise pay for the same factorization several times (mean, sample, and
+    density all need it).
+
+    Each entry of ``rhs`` is ``(b, modes)`` where ``modes`` is a single
+    ``MODE_*`` code or a sequence of them applied left to right — a chain. For a
+    chain ``[m0, m1, ...]`` the result is ``... m1(m0(b))``. Examples:
+
+    - posterior mean ``A^{-1} b``: ``(b, MODE_A)``
+    - a draw's factor part ``P' L^{-T} z``: ``(z, [MODE_LT, MODE_PT])``
+
+    Args:
+        Ai, Aj, Ax: COO of the SPD matrix ``A``, as in :func:`solve`.
+        rhs: list of ``(b, modes)``. Each ``b`` is ``[n]`` or ``[n, n_rhs]``.
+        want_logdet: if ``True``, also return ``log|A|`` from the same factor.
+        n: matrix dimension. Inferred from ``rhs[0]`` when omitted; required if
+            ``rhs`` is empty (logdet only).
+
+    Returns:
+        A list ``xs`` of solutions, one per ``rhs`` entry, each matching its
+        ``b``'s shape. If ``want_logdet`` is set, returns ``(xs, logdet)``.
+
+    Note:
+        This primitive is forward-only (no autodiff rule). Use :func:`solve` /
+        :func:`logdet`, which define VJPs, when you need gradients.
+    """
+    _require_x64()
+    Ai = jnp.asarray(Ai, jnp.int32)
+    Aj = jnp.asarray(Aj, jnp.int32)
+    Ax = jnp.asarray(Ax, jnp.float64)
+    if Ai.ndim != 1 or Ai.shape != Aj.shape or Ax.shape != Ai.shape:
+        raise ValueError("Ai, Aj, Ax must be 1D with equal lengths")
+
+    bs, chain_lens, mode_chain = [], [], []
+    for entry in rhs:
+        b, modes = entry
+        b = jnp.asarray(b, jnp.float64)
+        if b.ndim not in (1, 2):
+            raise ValueError(f"each rhs must be 1D or 2D, got shape {b.shape}")
+        if isinstance(modes, (int, np.integer)):
+            modes = (int(modes),)
+        else:
+            modes = tuple(int(m) for m in modes)
+        if any(m < 0 or m > 8 for m in modes):
+            raise ValueError(f"invalid solve mode in chain {modes}")
+        bs.append(b)
+        chain_lens.append(len(modes))
+        mode_chain.extend(modes)
+
+    if n is None:
+        if not bs:
+            raise ValueError("n must be given when rhs is empty")
+        n = int(bs[0].shape[0])
+    n = int(n)
+
+    key = (tuple(mode_chain), tuple(chain_lens), bool(want_logdet), n)
+    dispatch = _FS_DISPATCH.get(key)
+    if dispatch is None:
+        dispatch = _FS_DISPATCH[key] = _make_factor_solve_dispatch(*key)
+
+    outs = list(dispatch(Ai, Aj, Ax, tuple(bs)))
+    if want_logdet:
+        return outs[:-1], outs[-1]
+    return outs
+
+
+def sample_gaussian(Ai, Aj, Ax, b, z, want_logdet=False):
+    """Draw ``eta ~ N(A^{-1} b, A^{-1})`` from a single factorization of ``A``.
+
+    The Gibbs Gaussian-conditional step in one factorization: the posterior
+    mean ``A^{-1} b`` and the correlated draw share one Cholesky factor. With
+    ``A = P' L L' P``, a sample is ``eta = mean + P' L^{-T} z`` for
+    ``z ~ N(0, I)``, since ``Cov(P' L^{-T} z) = A^{-1}``. Built on
+    :func:`factor_solve`, so under ``vmap`` it factors once per element.
+
+    Args:
+        Ai, Aj, Ax: COO of the SPD precision matrix ``A``.
+        b: ``[n]`` or ``[n, n_rhs]`` — mean numerator (posterior mean is
+            ``A^{-1} b``).
+        z: standard-normal draw with the same shape as ``b``.
+        want_logdet: if ``True``, also return ``log|A|``.
+
+    Returns:
+        ``(eta, mean)``, or ``(eta, mean, logdet)`` if ``want_logdet``.
+    """
+    xs = factor_solve(
+        Ai, Aj, Ax,
+        [(b, MODE_A), (z, (MODE_LT, MODE_PT))],
+        want_logdet=want_logdet,
+    )
+    if want_logdet:
+        (mean, w), ld = xs
+        return mean + w, mean, ld
+    mean, w = xs
+    return mean + w, mean
+
+
 def update_solve(Ai, Aj, Ax, C, b, downdate=False, mode=MODE_A, return_logdet=False):
     """Solve ``(A ± C C') x = b`` via a rank-k update of ``A``'s factor.
 
@@ -386,3 +555,13 @@ def clear_cache():
 def cache_size():
     """Number of sparsity patterns currently cached."""
     return _cpp.cache_size()
+
+
+def factorization_count():
+    """Total numeric (re)factorizations performed since import.
+
+    Bumped only on a real factorization, not on the value-cache skip. Useful
+    for confirming that a fused :func:`factor_solve` / :func:`sample_gaussian`
+    sweep factors ``A`` once rather than once per solve.
+    """
+    return _cpp.factorization_count()

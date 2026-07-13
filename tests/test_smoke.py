@@ -263,6 +263,193 @@ class TestUpdown:
             ).block_until_ready()
 
 
+class TestFactorSolve:
+    def test_mean_and_logdet_from_one_factor(self, spd):
+        Ai, Aj, Ax, A = spd
+        n = A.shape[0]
+        rng = np.random.default_rng(20)
+        b = rng.normal(size=n)
+        cholmodjax.clear_cache()
+        c0 = cholmodjax.factorization_count()
+        xs, ld = cholmodjax.factor_solve(
+            Ai, Aj, Ax, [(b, cholmodjax.MODE_A)], want_logdet=True
+        )
+        jax.block_until_ready(xs)
+        np.testing.assert_allclose(xs[0], np.linalg.solve(A, b), rtol=1e-10)
+        np.testing.assert_allclose(float(ld), np.linalg.slogdet(A)[1], rtol=1e-10)
+        # mean + logdet came from a single factorization
+        assert cholmodjax.factorization_count() - c0 == 1
+
+    def test_multiple_chains_one_factor(self, spd):
+        """mean, a factor-part chain, and logdet — all from ONE factorization."""
+        Ai, Aj, Ax, A = spd
+        n = A.shape[0]
+        rng = np.random.default_rng(21)
+        b = rng.normal(size=n)
+        z = rng.normal(size=n)
+        cholmodjax.clear_cache()
+        c0 = cholmodjax.factorization_count()
+        (mean, w), ld = cholmodjax.factor_solve(
+            Ai, Aj, Ax,
+            [(b, cholmodjax.MODE_A), (z, (cholmodjax.MODE_LT, cholmodjax.MODE_PT))],
+            want_logdet=True,
+        )
+        jax.block_until_ready((mean, w, ld))
+        assert cholmodjax.factorization_count() - c0 == 1
+        np.testing.assert_allclose(mean, np.linalg.solve(A, b), rtol=1e-10)
+        np.testing.assert_allclose(float(ld), np.linalg.slogdet(A)[1], rtol=1e-10)
+        # w = P' L^-T z, so A w should equal L L' applied appropriately; check
+        # the defining property Cov: w has A^{-1} covariance <=> (L' P w) == z.
+        # Simpler exact check: separate calls reproduce the same w.
+        w_ref = cholmodjax.solve(
+            Ai, Aj, Ax,
+            cholmodjax.solve(Ai, Aj, Ax, z, mode=cholmodjax.MODE_LT),
+            mode=cholmodjax.MODE_PT,
+        )
+        np.testing.assert_allclose(w, w_ref, rtol=1e-10)
+
+    def test_matches_separate_calls(self, spd):
+        Ai, Aj, Ax, A = spd
+        n = A.shape[0]
+        rng = np.random.default_rng(22)
+        b = rng.normal(size=n)
+        c = rng.normal(size=n)
+        xs = cholmodjax.factor_solve(
+            Ai, Aj, Ax, [(b, cholmodjax.MODE_A), (c, cholmodjax.MODE_A)]
+        )
+        np.testing.assert_allclose(xs[0], cholmodjax.solve(Ai, Aj, Ax, b), rtol=1e-12)
+        np.testing.assert_allclose(xs[1], cholmodjax.solve(Ai, Aj, Ax, c), rtol=1e-12)
+
+    def test_logdet_only_empty_rhs(self, spd):
+        Ai, Aj, Ax, A = spd
+        (xs, ld) = cholmodjax.factor_solve(
+            Ai, Aj, Ax, [], want_logdet=True, n=A.shape[0]
+        )
+        assert xs == []
+        np.testing.assert_allclose(float(ld), np.linalg.slogdet(A)[1], rtol=1e-10)
+
+    def test_multi_rhs_entry(self, spd):
+        Ai, Aj, Ax, A = spd
+        n = A.shape[0]
+        rng = np.random.default_rng(23)
+        B = rng.normal(size=(n, 3))
+        (X,) = cholmodjax.factor_solve(Ai, Aj, Ax, [(B, cholmodjax.MODE_A)])
+        np.testing.assert_allclose(X, np.linalg.solve(A, B), rtol=1e-10)
+
+    def test_under_jit(self, spd):
+        Ai, Aj, Ax, A = spd
+        n = A.shape[0]
+        rng = np.random.default_rng(24)
+        b = rng.normal(size=n)
+        z = rng.normal(size=n)
+
+        @jax.jit
+        def f(Ax, b, z):
+            (mean, w), ld = cholmodjax.factor_solve(
+                Ai, Aj, Ax,
+                [(b, cholmodjax.MODE_A),
+                 (z, (cholmodjax.MODE_LT, cholmodjax.MODE_PT))],
+                want_logdet=True,
+            )
+            return mean, w, ld
+
+        mean, w, ld = f(Ax, b, z)
+        np.testing.assert_allclose(mean, np.linalg.solve(A, b), rtol=1e-10)
+        np.testing.assert_allclose(float(ld), np.linalg.slogdet(A)[1], rtol=1e-10)
+
+    def test_vmap_same_A_one_factorization(self, spd):
+        Ai, Aj, Ax, A = spd
+        n = A.shape[0]
+        rng = np.random.default_rng(25)
+        bs = rng.normal(size=(6, n))
+        cholmodjax.clear_cache()
+        c0 = cholmodjax.factorization_count()
+        xs = jax.vmap(
+            lambda b: cholmodjax.factor_solve(Ai, Aj, Ax, [(b, cholmodjax.MODE_A)])[0]
+        )(bs)
+        jax.block_until_ready(xs)
+        # identical A across the batch -> value cache collapses to 1 factorization
+        assert cholmodjax.factorization_count() - c0 == 1
+        for i in range(6):
+            np.testing.assert_allclose(xs[i], np.linalg.solve(A, bs[i]), rtol=1e-10)
+
+    def test_vmap_different_A_one_factorization_each(self, spd):
+        Ai, Aj, Ax, A = spd
+        n = A.shape[0]
+        rng = np.random.default_rng(26)
+        scales = np.linspace(1.0, 2.0, 4)
+        Axs = scales[:, None] * Ax
+        zs = rng.normal(size=(4, n))
+        b = rng.normal(size=n)
+        cholmodjax.clear_cache()
+        c0 = cholmodjax.factorization_count()
+        f = jax.jit(
+            jax.vmap(
+                lambda Ax, z: cholmodjax.sample_gaussian(Ai, Aj, Ax, b, z),
+                in_axes=(0, 0),
+            )
+        )
+        etas, means = f(Axs, zs)
+        jax.block_until_ready((etas, means))
+        # 4 elements, each needs mean+sample+... but ONE factorization apiece
+        assert cholmodjax.factorization_count() - c0 == 4
+        for i, s in enumerate(scales):
+            np.testing.assert_allclose(
+                means[i], np.linalg.solve(s * A, b), rtol=1e-10
+            )
+
+    def test_vmap_lowers_to_single_batched_call(self, spd):
+        Ai, Aj, Ax, A = spd
+        n = A.shape[0]
+        bs = np.ones((4, n))
+        f = jax.jit(
+            jax.vmap(
+                lambda b: cholmodjax.factor_solve(Ai, Aj, Ax, [(b, cholmodjax.MODE_A)])[0]
+            )
+        )
+        hlo = f.lower(bs).compile().as_text()
+        assert hlo.count("cholmodjax_factor_solve_batched_f64") == 1
+
+    def test_vmap_over_pattern_raises(self, spd):
+        Ai, Aj, Ax, A = spd
+        n = A.shape[0]
+        Ais = np.broadcast_to(Ai, (3,) + Ai.shape)
+        b = np.ones(n)
+        with pytest.raises(ValueError, match="sparsity pattern"):
+            jax.vmap(
+                lambda Ai: cholmodjax.factor_solve(Ai, Aj, Ax, [(b, cholmodjax.MODE_A)])[0]
+            )(Ais)
+
+
+class TestSampleGaussian:
+    def test_mean_and_covariance(self, spd):
+        Ai, Aj, Ax, A = spd
+        n = A.shape[0]
+        rng = np.random.default_rng(27)
+        b = rng.normal(size=n)
+        eta, mean = cholmodjax.sample_gaussian(Ai, Aj, Ax, b, rng.normal(size=n))
+        np.testing.assert_allclose(mean, np.linalg.solve(A, b), rtol=1e-10)
+        # empirical covariance of many draws ~ A^{-1}
+        zs = rng.normal(size=(6000, n))
+        etas = jax.vmap(
+            lambda z: cholmodjax.sample_gaussian(Ai, Aj, Ax, b, z)[0]
+        )(zs)
+        emp = np.cov(np.asarray(etas).T)
+        np.testing.assert_allclose(emp, np.linalg.inv(A), atol=0.05)
+
+    def test_logdet_option(self, spd):
+        Ai, Aj, Ax, A = spd
+        n = A.shape[0]
+        rng = np.random.default_rng(28)
+        b = rng.normal(size=n)
+        z = rng.normal(size=n)
+        eta, mean, ld = cholmodjax.sample_gaussian(
+            Ai, Aj, Ax, b, z, want_logdet=True
+        )
+        np.testing.assert_allclose(float(ld), np.linalg.slogdet(A)[1], rtol=1e-10)
+        np.testing.assert_allclose(mean, np.linalg.solve(A, b), rtol=1e-10)
+
+
 class TestBCOO:
     def _bcoo(self, A):
         from jax.experimental import sparse as jsparse

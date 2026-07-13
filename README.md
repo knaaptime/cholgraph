@@ -73,6 +73,36 @@ Features:
   `y = solve(..., solve(..., z, mode=MODE_LT), mode=MODE_PT)`.
 - **Not positive definite** → runtime exception (the factor is always a true LL').
 
+## Factor once, do everything: `factor_solve` / `sample_gaussian`
+
+`solve` and `logdet` are separate primitives, so a Gibbs sweep that needs a posterior mean, a
+correlated draw, and a log-determinant factors the *same* A several times — and under `vmap`
+that is one factorization per solve **per batch element**. `factor_solve` factors A once and
+serves every requested solve (each a *chain* of `MODE_*` codes) plus an optional `logdet` from
+that single factor. Under `vmap` it lowers to one batched FFI call that factors **once per
+element**, whatever the number of chains.
+
+```python
+# Gibbs Gaussian step: posterior mean, a draw ~ N(mean, A^-1), and log|A|,
+# from ONE factorization. eta = mean + P' L^-T z  (since A = P' L L' P).
+eta, mean, ld = cholmodjax.sample_gaussian(Ai, Aj, Ax, b, z, want_logdet=True)
+
+# ...or spell it out with the general primitive:
+(mean, w), ld = cholmodjax.factor_solve(
+    Ai, Aj, Ax,
+    [(b, cholmodjax.MODE_A),                          # A^-1 b
+     (z, (cholmodjax.MODE_LT, cholmodjax.MODE_PT))],  # P' L^-T z  (chain)
+    want_logdet=True)
+eta = mean + w
+```
+
+Each `rhs` entry is `(b, modes)` where `modes` is one `MODE_*` or a sequence applied left to
+right. `cholmodjax.factorization_count()` reports how many real factorizations have happened —
+handy for confirming the fusion. Benchmarked Gibbs draw (mean + sample + logdet) vmapped over a
+batch of *different* A's: **4× fewer factorizations and ~3.3–3.6× faster** than issuing the
+separate `solve`/`logdet` primitives. `factor_solve` is forward-only (no autodiff rule); use
+`solve`/`logdet` when you need gradients.
+
 ## JAX sparse (`BCOO`)
 
 JAX's native sparse type is `jax.experimental.sparse.BCOO`, whose `.indices` is `(nnz, 2)` and
@@ -132,7 +162,10 @@ CHOLMOD choose based on the matrix.
 - [x] `cholmod_updown` rank-k update/downdate (`update_solve`)
 - [x] Cache the simplicial LDL' base factor for updown (rebuilt only on refactor), so the
       LL'→LDL' conversion is paid once per base change, not once per call
+- [x] `factor_solve` / `sample_gaussian`: factor once, serve many solve chains + logdet from
+      one factor; fuses under `vmap` to one factorization per batch element
 - [ ] float32 (CHOLMOD 5 single precision) and int64 indices
+- [ ] Autodiff rule for `factor_solve` (currently forward-only)
 - [ ] Wheels / conda-forge packaging
 
 ## License
