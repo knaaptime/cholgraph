@@ -15,7 +15,6 @@ dependencies:
   - pytest
   - cxx-compiler
 
-
   # testing
   - jupyter
   - pytest
@@ -23,13 +22,3 @@ dependencies:
   - pytest-xdist
   - codecov
   - coverage
-  
-  - python-wget
-  - contextily
-  - python-graphviz
-  - nbsphinx
-  - numpydoc
-  - sphinx
-  - sphinxcontrib-bibtex
-  - sphinx_bootstrap_theme
-  - myst-parser

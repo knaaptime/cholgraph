@@ -23,11 +23,11 @@ jobs:
           - ci/313.yml
           - ci/314.yml
         include:
-          - environment-file: .ci/313.yml
+          - environment-file: ci/313.yml
             os: macos-latest
-          - environment-file: .ci/313.yml
+          - environment-file: ci/313.yml
             os: macos-15-intel
-          - environment-file: .ci/313.yml
+          - environment-file: ci/313.yml
             os: windows-latest
     defaults:
       run:
@@ -43,7 +43,7 @@ jobs:
           micromamba-version: 'latest'
 
       - name: Install package
-        run: pip install -e . --no-deps
+        run: pip install -e .  --no-build-isolation --no-deps
 
       - name: Test package
         run: |
@@ -52,17 +52,17 @@ jobs:
            -r a \
            -n auto \
            --color yes \
-           --cov geosnap \
+           --cov cholmodjax \
            --cov-append \
            --cov-report term-missing \
            --cov-report xml \
-           geosnap
+           cholmodjax
       - name: codecov
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           file: ./coverage.xml
-          name: geosnap-codecov
+          name: cholax-codecov
 
       - name: Generate and publish the report
         if: |
