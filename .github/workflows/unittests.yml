@@ -47,12 +47,12 @@ jobs:
 
       - name: Test package
         run: |
-          pytest --cov \
+          pytest tests --cov \
            -v \
            -r a \
            -n auto \
            --color yes \
-           --cov cholmodjax \
+           --cov src/cholmodjax \
            --cov-append \
            --cov-report term-missing \
            --cov-report xml \
