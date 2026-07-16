@@ -13,3 +13,4 @@ dependencies:
   - cmake
   - scikit-build-core
   - pytest
+  - cxx-compiler
