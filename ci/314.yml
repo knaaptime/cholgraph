@@ -1,0 +1,25 @@
+name: test
+channels:
+  - conda-forge
+dependencies:
+  - python
+  - pip
+  - scipy
+  - numpy
+  - jax
+  - scikit-sparse
+  - nanobind
+  - suitesparse
+  - cmake
+  - scikit-build-core
+  - pytest
+  - cxx-compiler
+
+  # testing
+  - jupyter
+  - pytest
+  - pytest-cov
+  - pytest-xdist
+  - codecov
+  - coverage
+  
