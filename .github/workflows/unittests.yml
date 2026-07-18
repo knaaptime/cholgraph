@@ -26,8 +26,6 @@ jobs:
           - environment-file: ci/313.yml
             os: macos-latest
           - environment-file: ci/313.yml
-            os: macos-15-intel
-          - environment-file: ci/313.yml
             os: windows-latest
     defaults:
       run:
