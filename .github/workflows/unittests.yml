@@ -47,16 +47,16 @@ jobs:
 
       - name: Test package
         run: |
-          pytest tests --cov \
+          pytest --cov src/cholgraph \
            -v \
            -r a \
            -n auto \
            --color yes \
-           --cov src/cholgraph \
+           --cov src \
            --cov-append \
            --cov-report term-missing \
            --cov-report xml \
-           cholgraph
+           tests
       - name: codecov
         uses: codecov/codecov-action@v5
         with:
