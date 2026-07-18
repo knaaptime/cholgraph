@@ -1,4 +1,4 @@
-name: cholmodjax
+name: cholgraph
 channels:
   - conda-forge
 dependencies:

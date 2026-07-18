@@ -1,4 +1,4 @@
-"""Tests for the optional PyTensor frontend (cholmodjax.pytensor).
+"""Tests for the optional PyTensor frontend (cholgraph.pytensor).
 
 Skipped entirely if PyTensor is not installed.
 """
@@ -10,8 +10,8 @@ pytensor = pytest.importorskip("pytensor")
 import pytensor.tensor as pt  # noqa: E402
 from pytensor.gradient import verify_grad  # noqa: E402
 
-import cholmodjax  # noqa: E402
-import cholmodjax.pytensor as cjpt  # noqa: E402
+import cholgraph  # noqa: E402
+import cholgraph.pytensor as cjpt  # noqa: E402
 
 
 def spd_coo(n=16, seed=0):
@@ -68,9 +68,9 @@ class TestForward:
         Axv, bv = pt.dvector("Ax"), pt.dvector("b")
         x_pt = pytensor.function([Axv, bv], cjpt.solve(Ai, Aj, Axv, bv))(Ax, b)
         ld_pt = float(pytensor.function([Axv], cjpt.logdet(Ai, Aj, Axv, n))(Ax))
-        np.testing.assert_allclose(x_pt, cholmodjax.solve(Ai, Aj, Ax, b), rtol=1e-12)
+        np.testing.assert_allclose(x_pt, cholgraph.solve(Ai, Aj, Ax, b), rtol=1e-12)
         np.testing.assert_allclose(
-            ld_pt, float(cholmodjax.logdet(Ai, Aj, Ax, n)), rtol=1e-12
+            ld_pt, float(cholgraph.logdet(Ai, Aj, Ax, n)), rtol=1e-12
         )
 
 

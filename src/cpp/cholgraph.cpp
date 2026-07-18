@@ -1,4 +1,4 @@
-// cholmodjax: CHOLMOD sparse Cholesky as XLA FFI custom calls.
+// cholgraph: CHOLMOD sparse Cholesky as XLA FFI custom calls.
 //
 // Design:
 //   - A single global cholmod_common guarded by a mutex (CHOLMOD's workspace
@@ -141,7 +141,7 @@ static PatternEntry* create_entry_locked(const int32_t* Ai, const int32_t* Aj,
                                          std::string* err) {
   for (int64_t k = 0; k < nnz; ++k) {
     if (Ai[k] < 0 || Ai[k] >= n || Aj[k] < 0 || Aj[k] >= n) {
-      *err = "cholmodjax: COO index out of range for matrix dimension " +
+      *err = "cholgraph: COO index out of range for matrix dimension " +
              std::to_string(n);
       return nullptr;
     }
@@ -176,7 +176,7 @@ static PatternEntry* create_entry_locked(const int32_t* Ai, const int32_t* Aj,
       n, n, nnz_csc, /*sorted=*/1, /*packed=*/1, /*stype=*/1, CHOLMOD_REAL,
       &g_common);
   if (!A) {
-    *err = "cholmodjax: cholmod_allocate_sparse failed";
+    *err = "cholgraph: cholmod_allocate_sparse failed";
     return nullptr;
   }
 
@@ -202,7 +202,7 @@ static PatternEntry* create_entry_locked(const int32_t* Ai, const int32_t* Aj,
   entry->L = cholmod_analyze(A, &g_common);
   if (!entry->L || g_common.status < CHOLMOD_OK) {
     free_entry_locked(entry.get());
-    *err = "cholmodjax: cholmod_analyze failed (status " +
+    *err = "cholgraph: cholmod_analyze failed (status " +
            std::to_string(g_common.status) + ")";
     return nullptr;
   }
@@ -289,14 +289,14 @@ static bool factorize_locked(PatternEntry* e, const double* Ax, int64_t nnz,
   if (g_common.status == CHOLMOD_NOT_POSDEF) {
     e->factored = false;
     e->last_Ax.clear();
-    *err = "cholmodjax: matrix is not positive definite (failure at column " +
+    *err = "cholgraph: matrix is not positive definite (failure at column " +
            std::to_string(e->L->minor) + ")";
     return false;
   }
   if (g_common.status < CHOLMOD_OK) {
     e->factored = false;
     e->last_Ax.clear();
-    *err = "cholmodjax: cholmod_factorize failed (status " +
+    *err = "cholgraph: cholmod_factorize failed (status " +
            std::to_string(g_common.status) + ")";
     return false;
   }
@@ -306,7 +306,7 @@ static bool factorize_locked(PatternEntry* e, const double* Ax, int64_t nnz,
     // turns negative pivots into NaNs, which land here.
     e->factored = false;
     e->last_Ax.clear();
-    *err = "cholmodjax: matrix is not positive definite";
+    *err = "cholgraph: matrix is not positive definite";
     return false;
   }
   e->last_Ax.assign(Ax, Ax + nnz);
@@ -362,7 +362,7 @@ static ffi::Error solve_one_locked(PatternEntry* e, cholmod_factor* L, int mode,
   int ok = cholmod_solve2(mode, L, &B, nullptr, &e->Xwork, nullptr, &e->Ywork,
                           &e->Ework, &g_common);
   if (!ok || !e->Xwork || g_common.status < CHOLMOD_OK)
-    return ffi::Error::Internal("cholmodjax: cholmod_solve failed (status " +
+    return ffi::Error::Internal("cholgraph: cholmod_solve failed (status " +
                                 std::to_string(g_common.status) + ")");
 
   const double* Xx = static_cast<const double*>(e->Xwork->x);
@@ -387,16 +387,16 @@ static ffi::Error SolveF64Impl(ffi::Buffer<ffi::S32> Ai,
                                ffi::ResultBuffer<ffi::F64> x, int64_t mode) {
   auto bdims = b.dimensions();
   if (bdims.size() < 1 || bdims.size() > 2)
-    return ffi::Error::InvalidArgument("cholmodjax: b must be 1D or 2D");
+    return ffi::Error::InvalidArgument("cholgraph: b must be 1D or 2D");
   int64_t n = bdims[0];
   int64_t nrhs = bdims.size() == 2 ? bdims[1] : 1;
   int64_t nnz = static_cast<int64_t>(Ai.element_count());
   if (static_cast<int64_t>(Aj.element_count()) != nnz ||
       static_cast<int64_t>(Ax.element_count()) != nnz)
     return ffi::Error::InvalidArgument(
-        "cholmodjax: Ai, Aj, Ax must have the same length");
+        "cholgraph: Ai, Aj, Ax must have the same length");
   if (mode < 0 || mode > 8)
-    return ffi::Error::InvalidArgument("cholmodjax: invalid solve mode");
+    return ffi::Error::InvalidArgument("cholgraph: invalid solve mode");
 
   std::lock_guard<std::mutex> lock(g_mutex);
   ensure_started_locked();
@@ -440,7 +440,7 @@ static ffi::Error SolveBatchedF64Impl(ffi::Buffer<ffi::S32> Ai,
   auto bdims = b.dimensions();
   if (bdims.size() < 2 || bdims.size() > 3)
     return ffi::Error::InvalidArgument(
-        "cholmodjax: batched b must be 2D or 3D");
+        "cholgraph: batched b must be 2D or 3D");
   int64_t batch = bdims[0];
   int64_t n = bdims[1];
   int64_t nrhs = bdims.size() == 3 ? bdims[2] : 1;
@@ -448,12 +448,12 @@ static ffi::Error SolveBatchedF64Impl(ffi::Buffer<ffi::S32> Ai,
   auto axdims = Ax.dimensions();
   if (axdims.size() != 2 || axdims[0] != batch || axdims[1] != nnz)
     return ffi::Error::InvalidArgument(
-        "cholmodjax: batched Ax must have shape (batch, nnz) matching b");
+        "cholgraph: batched Ax must have shape (batch, nnz) matching b");
   if (static_cast<int64_t>(Aj.element_count()) != nnz)
     return ffi::Error::InvalidArgument(
-        "cholmodjax: Ai, Aj must have the same length");
+        "cholgraph: Ai, Aj must have the same length");
   if (mode < 0 || mode > 8)
-    return ffi::Error::InvalidArgument("cholmodjax: invalid solve mode");
+    return ffi::Error::InvalidArgument("cholgraph: invalid solve mode");
 
   std::lock_guard<std::mutex> lock(g_mutex);
   ensure_started_locked();
@@ -502,7 +502,7 @@ static ffi::Error LogdetF64Impl(ffi::Buffer<ffi::S32> Ai,
   if (static_cast<int64_t>(Aj.element_count()) != nnz ||
       static_cast<int64_t>(Ax.element_count()) != nnz)
     return ffi::Error::InvalidArgument(
-        "cholmodjax: Ai, Aj, Ax must have the same length");
+        "cholgraph: Ai, Aj, Ax must have the same length");
 
   std::lock_guard<std::mutex> lock(g_mutex);
   ensure_started_locked();
@@ -564,7 +564,7 @@ static ffi::Error apply_solves_locked(
     for (int64_t s = 0; s < len; ++s) {
       int64_t mode = mode_chain[coff + s];
       if (mode < 0 || mode > 8)
-        return ffi::Error::InvalidArgument("cholmodjax: invalid solve mode");
+        return ffi::Error::InvalidArgument("cholgraph: invalid solve mode");
       // Final step writes into the output buffer; intermediates ping-pong.
       double* out;
       if (s == len - 1)
@@ -593,14 +593,14 @@ static ffi::Error FactorSolveF64Impl(
   if (static_cast<int64_t>(Aj.element_count()) != nnz ||
       static_cast<int64_t>(Ax.element_count()) != nnz)
     return ffi::Error::InvalidArgument(
-        "cholmodjax: Ai, Aj, Ax must have the same length");
+        "cholgraph: Ai, Aj, Ax must have the same length");
   int64_t K = static_cast<int64_t>(chain_lens.size());
   if (static_cast<int64_t>(rhs.size()) != K)
     return ffi::Error::InvalidArgument(
-        "cholmodjax: number of right-hand sides must match chain_lens");
+        "cholgraph: number of right-hand sides must match chain_lens");
   if (static_cast<int64_t>(rets.size()) != K + (want_logdet ? 1 : 0))
     return ffi::Error::InvalidArgument(
-        "cholmodjax: number of results must match rhs count (+ logdet)");
+        "cholgraph: number of results must match rhs count (+ logdet)");
 
   std::vector<const double*> bptr(K);
   std::vector<double*> xptr(K);
@@ -613,7 +613,7 @@ static ffi::Error FactorSolveF64Impl(
     auto bdims = b->dimensions();
     if (bdims.size() < 1 || bdims.size() > 2 || bdims[0] != n)
       return ffi::Error::InvalidArgument(
-          "cholmodjax: each rhs must be (n) or (n, nrhs) with matching n");
+          "cholgraph: each rhs must be (n) or (n, nrhs) with matching n");
     bptr[k] = b->typed_data();
     xptr[k] = (*x)->typed_data();
     nrhs[k] = bdims.size() == 2 ? bdims[1] : 1;
@@ -668,15 +668,15 @@ static ffi::Error FactorSolveBatchedF64Impl(
   auto axdims = Ax.dimensions();
   if (axdims.size() != 2 || axdims[1] != nnz)
     return ffi::Error::InvalidArgument(
-        "cholmodjax: batched Ax must have shape (batch, nnz)");
+        "cholgraph: batched Ax must have shape (batch, nnz)");
   int64_t batch = axdims[0];
   int64_t K = static_cast<int64_t>(chain_lens.size());
   if (static_cast<int64_t>(rhs.size()) != K)
     return ffi::Error::InvalidArgument(
-        "cholmodjax: number of right-hand sides must match chain_lens");
+        "cholgraph: number of right-hand sides must match chain_lens");
   if (static_cast<int64_t>(rets.size()) != K + (want_logdet ? 1 : 0))
     return ffi::Error::InvalidArgument(
-        "cholmodjax: number of results must match rhs count (+ logdet)");
+        "cholgraph: number of results must match rhs count (+ logdet)");
 
   // Per-rhs element strides and per-batch base pointers.
   std::vector<const double*> bbase(K);
@@ -691,7 +691,7 @@ static ffi::Error FactorSolveBatchedF64Impl(
     if (bdims.size() < 2 || bdims.size() > 3 || bdims[0] != batch ||
         bdims[1] != n)
       return ffi::Error::InvalidArgument(
-          "cholmodjax: each batched rhs must be (batch, n[, nrhs])");
+          "cholgraph: each batched rhs must be (batch, n[, nrhs])");
     nrhs[k] = bdims.size() == 3 ? bdims[2] : 1;
     bstride[k] = n * nrhs[k];
     bbase[k] = b->typed_data();
@@ -758,11 +758,11 @@ static ffi::Error ensure_ldl_locked(PatternEntry* e) {
   if (e->Lldl) cholmod_free_factor(&e->Lldl, &g_common);
   e->Lldl = cholmod_copy_factor(e->L, &g_common);
   if (!e->Lldl)
-    return ffi::Error::Internal("cholmodjax: cholmod_copy_factor failed");
+    return ffi::Error::Internal("cholgraph: cholmod_copy_factor failed");
   if (!cholmod_change_factor(CHOLMOD_REAL, /*to_ll=*/0, /*to_super=*/0,
                              /*to_packed=*/1, /*to_monotonic=*/1, e->Lldl,
                              &g_common))
-    return ffi::Error::Internal("cholmodjax: cholmod_change_factor failed");
+    return ffi::Error::Internal("cholgraph: cholmod_change_factor failed");
   e->ldl_epoch = e->factor_epoch;
   return ffi::Error::Success();
 }
@@ -862,7 +862,7 @@ static ffi::Error SelinvF64Impl(ffi::Buffer<ffi::S32> Ai,
   if (static_cast<int64_t>(Aj.element_count()) != nnz ||
       static_cast<int64_t>(Ax.element_count()) != nnz)
     return ffi::Error::InvalidArgument(
-        "cholmodjax: Ai, Aj, Ax must have the same length");
+        "cholgraph: Ai, Aj, Ax must have the same length");
 
   std::lock_guard<std::mutex> lock(g_mutex);
   ensure_started_locked();
@@ -908,21 +908,21 @@ static ffi::Error UpdownSolveF64Impl(ffi::Buffer<ffi::S32> Ai,
                                      int64_t mode, int64_t downdate) {
   auto bdims = b.dimensions();
   if (bdims.size() < 1 || bdims.size() > 2)
-    return ffi::Error::InvalidArgument("cholmodjax: b must be 1D or 2D");
+    return ffi::Error::InvalidArgument("cholgraph: b must be 1D or 2D");
   int64_t n = bdims[0];
   int64_t nrhs = bdims.size() == 2 ? bdims[1] : 1;
   int64_t nnz = static_cast<int64_t>(Ai.element_count());
   if (static_cast<int64_t>(Aj.element_count()) != nnz ||
       static_cast<int64_t>(Ax.element_count()) != nnz)
     return ffi::Error::InvalidArgument(
-        "cholmodjax: Ai, Aj, Ax must have the same length");
+        "cholgraph: Ai, Aj, Ax must have the same length");
   auto cdims = C.dimensions();
   if (cdims.size() != 2 || cdims[0] != n)
     return ffi::Error::InvalidArgument(
-        "cholmodjax: C must have shape (n, k) matching b's dimension n");
+        "cholgraph: C must have shape (n, k) matching b's dimension n");
   int64_t k = cdims[1];
   if (mode < 0 || mode > 8)
-    return ffi::Error::InvalidArgument("cholmodjax: invalid solve mode");
+    return ffi::Error::InvalidArgument("cholgraph: invalid solve mode");
 
   std::lock_guard<std::mutex> lock(g_mutex);
   ensure_started_locked();
@@ -945,7 +945,7 @@ static ffi::Error UpdownSolveF64Impl(ffi::Buffer<ffi::S32> Ai,
   if (e->Lupd) cholmod_free_factor(&e->Lupd, &g_common);
   e->Lupd = cholmod_copy_factor(e->Lldl, &g_common);
   if (!e->Lupd)
-    return ffi::Error::Internal("cholmodjax: cholmod_copy_factor failed");
+    return ffi::Error::Internal("cholgraph: cholmod_copy_factor failed");
 
   // Build sparse C (n x k) from the dense, row-major input via a column-major
   // temporary. cholmod_updown works in the factor's permuted space
@@ -972,18 +972,18 @@ static ffi::Error UpdownSolveF64Impl(ffi::Buffer<ffi::S32> Ai,
 
   cholmod_sparse* Cs = cholmod_dense_to_sparse(&Cd, /*values=*/1, &g_common);
   if (!Cs)
-    return ffi::Error::Internal("cholmodjax: cholmod_dense_to_sparse failed");
+    return ffi::Error::Internal("cholgraph: cholmod_dense_to_sparse failed");
 
   int ok = cholmod_updown(downdate ? 0 : 1, Cs, e->Lupd, &g_common);
   cholmod_free_sparse(&Cs, &g_common);
   if (!ok || g_common.status < CHOLMOD_OK)
-    return ffi::Error::Internal("cholmodjax: cholmod_updown failed (status " +
+    return ffi::Error::Internal("cholgraph: cholmod_updown failed (status " +
                                 std::to_string(g_common.status) + ")");
 
   double ld = factor_logdet(e->Lupd);
   if (!std::isfinite(ld))
     return ffi::Error::Internal(
-        "cholmodjax: updated matrix A ± C C' is not positive definite");
+        "cholgraph: updated matrix A ± C C' is not positive definite");
   out_logdet->typed_data()[0] = ld;
 
   std::vector<double> scratch;
@@ -1006,7 +1006,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(CholmodUpdownSolveF64, UpdownSolveF64Impl,
 // ---------------------------------------------------------------------------
 // Numpy-callable core (framework-agnostic, no XLA). These call the same cached
 // CHOLMOD core as the FFI handlers but take and return plain numpy arrays, so
-// non-JAX frontends — the PyTensor Ops in cholmodjax.pytensor — can reach the
+// non-JAX frontends — the PyTensor Ops in cholgraph.pytensor — can reach the
 // solver and its selected-inverse gradient without going through XLA. Errors
 // are raised as Python exceptions.
 // ---------------------------------------------------------------------------
@@ -1020,7 +1020,7 @@ static void check_coo_np(const ArrI32& Ai, const ArrI32& Aj, const ArrF64& Ax,
   if (static_cast<int64_t>(Aj.shape(0)) != nnz || Ax.ndim() != 1 ||
       static_cast<int64_t>(Ax.shape(0)) != nnz)
     throw std::runtime_error(
-        "cholmodjax: Ai, Aj, Ax must be 1D with the same length");
+        "cholgraph: Ai, Aj, Ax must be 1D with the same length");
 }
 
 static nb::ndarray<nb::numpy, double> solve_np(ArrI32 Ai, ArrI32 Aj, ArrF64 Ax,
@@ -1028,9 +1028,9 @@ static nb::ndarray<nb::numpy, double> solve_np(ArrI32 Ai, ArrI32 Aj, ArrF64 Ax,
   int64_t nnz = static_cast<int64_t>(Ai.shape(0));
   check_coo_np(Ai, Aj, Ax, nnz);
   if (b.ndim() < 1 || b.ndim() > 2)
-    throw std::runtime_error("cholmodjax: b must be 1D or 2D");
+    throw std::runtime_error("cholgraph: b must be 1D or 2D");
   if (mode < 0 || mode > 8)
-    throw std::runtime_error("cholmodjax: invalid solve mode");
+    throw std::runtime_error("cholgraph: invalid solve mode");
   int64_t n = static_cast<int64_t>(b.shape(0));
   int64_t nrhs = b.ndim() == 2 ? static_cast<int64_t>(b.shape(1)) : 1;
 
@@ -1045,7 +1045,7 @@ static nb::ndarray<nb::numpy, double> solve_np(ArrI32 Ai, ArrI32 Aj, ArrF64 Ax,
     std::vector<double> scratch;
     ffi::Error r = solve_one_locked(e, e->L, static_cast<int>(mode), b.data(), n,
                                     nrhs, out, &scratch);
-    if (r.failure()) throw std::runtime_error("cholmodjax: solve failed");
+    if (r.failure()) throw std::runtime_error("cholgraph: solve failed");
   }
   if (b.ndim() == 2)
     return nb::ndarray<nb::numpy, double>(
@@ -1076,7 +1076,7 @@ static nb::ndarray<nb::numpy, double> selinv_np(ArrI32 Ai, ArrI32 Aj, ArrF64 Ax,
     PatternEntry* e =
         prepare_entry_locked(Ai.data(), Aj.data(), Ax.data(), nnz, n);
     ffi::Error r = selinv_locked(e, nnz, out);
-    if (r.failure()) throw std::runtime_error("cholmodjax: selinv failed");
+    if (r.failure()) throw std::runtime_error("cholgraph: selinv failed");
   }
   return nb::ndarray<nb::numpy, double>(out, {static_cast<size_t>(nnz)}, owner);
 }
@@ -1085,7 +1085,7 @@ static nb::ndarray<nb::numpy, double> selinv_np(ArrI32 Ai, ArrI32 Aj, ArrF64 Ax,
 // nanobind module
 // ---------------------------------------------------------------------------
 
-NB_MODULE(cholmodjax_cpp, m) {
+NB_MODULE(cholgraph_cpp, m) {
   m.doc() = "CHOLMOD sparse Cholesky as XLA FFI custom calls";
 
   m.def("solve_f64_capsule", []() {
@@ -1110,7 +1110,7 @@ NB_MODULE(cholmodjax_cpp, m) {
     return nb::capsule(reinterpret_cast<void*>(CholmodFactorSolveBatchedF64));
   });
 
-  // Numpy-callable core, for non-JAX frontends (cholmodjax.pytensor).
+  // Numpy-callable core, for non-JAX frontends (cholgraph.pytensor).
   m.def("solve_np", &solve_np);
   m.def("logdet_np", &logdet_np);
   m.def("selinv_np", &selinv_np);

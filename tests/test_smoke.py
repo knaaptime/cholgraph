@@ -1,4 +1,4 @@
-"""Tests for cholmodjax: correctness, jit, scan, vmap, AD, logdet, errors."""
+"""Tests for cholgraph: correctness, jit, scan, vmap, AD, logdet, errors."""
 
 import jax
 
@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 import scipy.sparse as sp
 
-import cholmodjax
+import cholgraph
 
 
 def grid_laplacian(k, seed=0):
@@ -35,21 +35,21 @@ class TestSolveCorrectness:
     def test_full_symmetric_coo(self, spd):
         Ai, Aj, Ax, A = spd
         b = np.arange(1.0, A.shape[0] + 1.0)
-        x = cholmodjax.solve(Ai, Aj, Ax, b)
+        x = cholgraph.solve(Ai, Aj, Ax, b)
         np.testing.assert_allclose(x, np.linalg.solve(A, b), rtol=1e-10)
 
     def test_upper_triangle_only(self, spd):
         Ai, Aj, Ax, A = spd
         keep = Ai <= Aj
         b = np.arange(1.0, A.shape[0] + 1.0)
-        x = cholmodjax.solve(Ai[keep], Aj[keep], Ax[keep], b)
+        x = cholgraph.solve(Ai[keep], Aj[keep], Ax[keep], b)
         np.testing.assert_allclose(x, np.linalg.solve(A, b), rtol=1e-10)
 
     def test_multi_rhs(self, spd):
         Ai, Aj, Ax, A = spd
         rng = np.random.default_rng(1)
         B = rng.normal(size=(A.shape[0], 5))
-        X = cholmodjax.solve(Ai, Aj, Ax, B)
+        X = cholgraph.solve(Ai, Aj, Ax, B)
         assert X.shape == B.shape
         np.testing.assert_allclose(X, np.linalg.solve(A, B), rtol=1e-10)
 
@@ -59,7 +59,7 @@ class TestSolveCorrectness:
         Aj = np.array([0, 0, 1, 1, 1], dtype=np.int32)
         Ax = np.array([1.0, 1.0, 1.0, 2.0, 1.0])
         b = np.array([1.0, 2.0])
-        x = cholmodjax.solve(Ai, Aj, Ax, b)
+        x = cholgraph.solve(Ai, Aj, Ax, b)
         np.testing.assert_allclose(
             x, np.linalg.solve(np.array([[2.0, 1.0], [1.0, 3.0]]), b), rtol=1e-12
         )
@@ -72,7 +72,7 @@ class TestJIT:
 
         @jax.jit
         def f(Ax, b):
-            return cholmodjax.solve(Ai, Aj, Ax, b)
+            return cholgraph.solve(Ai, Aj, Ax, b)
 
         np.testing.assert_allclose(f(Ax, b), np.linalg.solve(A, b), rtol=1e-10)
 
@@ -81,7 +81,7 @@ class TestJIT:
         Ai, Aj, Ax, A = spd
         n = A.shape[0]
         b = np.ones(n)
-        f = jax.jit(lambda Ax, b: cholmodjax.solve(Ai, Aj, Ax, b))
+        f = jax.jit(lambda Ax, b: cholgraph.solve(Ai, Aj, Ax, b))
         for scale in (1.0, 2.5, 0.7):
             np.testing.assert_allclose(
                 f(scale * Ax, b), np.linalg.solve(scale * A, b), rtol=1e-10
@@ -95,7 +95,7 @@ class TestJIT:
         @jax.jit
         def run(Ax0):
             def step(carry, scale):
-                x = cholmodjax.solve(Ai, Aj, Ax0 * scale, b)
+                x = cholgraph.solve(Ai, Aj, Ax0 * scale, b)
                 return carry + x.sum(), x.sum()
 
             return jax.lax.scan(step, 0.0, jnp.array([1.0, 2.0, 4.0]))
@@ -111,7 +111,7 @@ class TestBatching:
         Ai, Aj, Ax, A = spd
         rng = np.random.default_rng(2)
         bs = rng.normal(size=(4, A.shape[0]))
-        xs = jax.vmap(lambda b: cholmodjax.solve(Ai, Aj, Ax, b))(bs)
+        xs = jax.vmap(lambda b: cholgraph.solve(Ai, Aj, Ax, b))(bs)
         np.testing.assert_allclose(xs, np.linalg.solve(A, bs.T).T, rtol=1e-10)
 
     def test_vmap_over_values(self, spd):
@@ -119,7 +119,7 @@ class TestBatching:
         b = np.ones(A.shape[0])
         scales = np.array([1.0, 3.0])
         Axs = scales[:, None] * Ax
-        xs = jax.vmap(lambda Ax: cholmodjax.solve(Ai, Aj, Ax, b))(Axs)
+        xs = jax.vmap(lambda Ax: cholgraph.solve(Ai, Aj, Ax, b))(Axs)
         for s, x in zip(scales, xs):
             np.testing.assert_allclose(x, np.linalg.solve(s * A, b), rtol=1e-10)
 
@@ -129,7 +129,7 @@ class TestBatching:
         scales = np.array([1.0, 2.0, 0.5])
         Axs = scales[:, None] * Ax
         bs = rng.normal(size=(3, A.shape[0]))
-        xs = jax.jit(jax.vmap(lambda Ax, b: cholmodjax.solve(Ai, Aj, Ax, b)))(Axs, bs)
+        xs = jax.jit(jax.vmap(lambda Ax, b: cholgraph.solve(Ai, Aj, Ax, b)))(Axs, bs)
         for i, s in enumerate(scales):
             np.testing.assert_allclose(xs[i], np.linalg.solve(s * A, bs[i]), rtol=1e-10)
 
@@ -137,7 +137,7 @@ class TestBatching:
         Ai, Aj, Ax, A = spd
         rng = np.random.default_rng(5)
         Bs = rng.normal(size=(3, A.shape[0], 2))
-        xs = jax.vmap(lambda B: cholmodjax.solve(Ai, Aj, Ax, B))(Bs)
+        xs = jax.vmap(lambda B: cholgraph.solve(Ai, Aj, Ax, B))(Bs)
         for i in range(3):
             np.testing.assert_allclose(xs[i], np.linalg.solve(A, Bs[i]), rtol=1e-10)
 
@@ -145,9 +145,9 @@ class TestBatching:
         """vmap must route to the native batched FFI call, exactly once."""
         Ai, Aj, Ax, A = spd
         bs = np.ones((4, A.shape[0]))
-        f = jax.jit(jax.vmap(lambda b: cholmodjax.solve(Ai, Aj, Ax, b)))
+        f = jax.jit(jax.vmap(lambda b: cholgraph.solve(Ai, Aj, Ax, b)))
         hlo = f.lower(bs).compile().as_text()
-        assert hlo.count("cholmodjax_solve_batched_f64") == 1
+        assert hlo.count("cholgraph_solve_batched_f64") == 1
 
     def test_vmap_of_grad(self, spd):
         """vmap composed with grad still batches and stays correct."""
@@ -158,7 +158,7 @@ class TestBatching:
         Axs = scales[:, None] * Ax
 
         def loss(Ax):
-            return (cholmodjax.solve(Ai, Aj, Ax, b) ** 2).sum()
+            return (cholgraph.solve(Ai, Aj, Ax, b) ** 2).sum()
 
         gs = jax.vmap(jax.grad(loss))(Axs)
         for i in range(len(scales)):
@@ -176,7 +176,7 @@ class TestUpdown:
         n = A.shape[0]
         c = rng.normal(size=n)
         b = rng.normal(size=n)
-        x = cholmodjax.update_solve(Ai, Aj, Ax, c, b)
+        x = cholgraph.update_solve(Ai, Aj, Ax, c, b)
         np.testing.assert_allclose(x, np.linalg.solve(A + np.outer(c, c), b), rtol=1e-9)
 
     def test_rank_k_update(self, spd):
@@ -185,7 +185,7 @@ class TestUpdown:
         n = A.shape[0]
         C = rng.normal(size=(n, 4)) * 0.3
         b = rng.normal(size=n)
-        x = cholmodjax.update_solve(Ai, Aj, Ax, C, b)
+        x = cholgraph.update_solve(Ai, Aj, Ax, C, b)
         np.testing.assert_allclose(x, np.linalg.solve(A + C @ C.T, b), rtol=1e-9)
 
     def test_downdate(self, spd):
@@ -194,7 +194,7 @@ class TestUpdown:
         n = A.shape[0]
         c = rng.normal(size=n) * 0.1  # small so A - cc' stays SPD
         b = rng.normal(size=n)
-        x = cholmodjax.update_solve(Ai, Aj, Ax, c, b, downdate=True)
+        x = cholgraph.update_solve(Ai, Aj, Ax, c, b, downdate=True)
         np.testing.assert_allclose(x, np.linalg.solve(A - np.outer(c, c), b), rtol=1e-9)
 
     def test_logdet(self, spd):
@@ -203,7 +203,7 @@ class TestUpdown:
         n = A.shape[0]
         c = rng.normal(size=n)
         b = rng.normal(size=n)
-        x, ld = cholmodjax.update_solve(Ai, Aj, Ax, c, b, return_logdet=True)
+        x, ld = cholgraph.update_solve(Ai, Aj, Ax, c, b, return_logdet=True)
         np.testing.assert_allclose(
             float(ld), np.linalg.slogdet(A + np.outer(c, c))[1], rtol=1e-10
         )
@@ -214,7 +214,7 @@ class TestUpdown:
         n = A.shape[0]
         c = rng.normal(size=n)
         B = rng.normal(size=(n, 3))
-        X = cholmodjax.update_solve(Ai, Aj, Ax, c, B)
+        X = cholgraph.update_solve(Ai, Aj, Ax, c, B)
         np.testing.assert_allclose(X, np.linalg.solve(A + np.outer(c, c), B), rtol=1e-9)
 
     def test_under_jit(self, spd):
@@ -223,7 +223,7 @@ class TestUpdown:
         n = A.shape[0]
         c = rng.normal(size=n)
         b = rng.normal(size=n)
-        f = jax.jit(lambda Ax, c, b: cholmodjax.update_solve(Ai, Aj, Ax, c, b))
+        f = jax.jit(lambda Ax, c, b: cholgraph.update_solve(Ai, Aj, Ax, c, b))
         np.testing.assert_allclose(
             f(Ax, c, b), np.linalg.solve(A + np.outer(c, c), b), rtol=1e-9
         )
@@ -233,7 +233,7 @@ class TestUpdown:
         Ai, Aj, Ax, A = spd
         n = A.shape[0]
         b = np.arange(1.0, n + 1.0)
-        x = cholmodjax.update_solve(Ai, Aj, Ax, np.zeros(n), b)
+        x = cholgraph.update_solve(Ai, Aj, Ax, np.zeros(n), b)
         np.testing.assert_allclose(x, np.linalg.solve(A, b), rtol=1e-10)
 
     def test_changing_base_rebuilds_ldl_cache(self, spd):
@@ -248,7 +248,7 @@ class TestUpdown:
         c = rng.normal(size=n)
         b = rng.normal(size=n)
         for s in (1.0, 2.5, 1.0, 0.7, 2.5):
-            x = cholmodjax.update_solve(Ai, Aj, s * Ax, c, b)
+            x = cholgraph.update_solve(Ai, Aj, s * Ax, c, b)
             np.testing.assert_allclose(
                 x, np.linalg.solve(s * A + np.outer(c, c), b), rtol=1e-9
             )
@@ -258,7 +258,7 @@ class TestUpdown:
         n = A.shape[0]
         c = np.full(n, 100.0)  # huge downdate -> not positive definite
         with pytest.raises(Exception, match="positive definite"):
-            cholmodjax.update_solve(
+            cholgraph.update_solve(
                 Ai, Aj, Ax, c, np.ones(n), downdate=True
             ).block_until_ready()
 
@@ -269,16 +269,16 @@ class TestFactorSolve:
         n = A.shape[0]
         rng = np.random.default_rng(20)
         b = rng.normal(size=n)
-        cholmodjax.clear_cache()
-        c0 = cholmodjax.factorization_count()
-        xs, ld = cholmodjax.factor_solve(
-            Ai, Aj, Ax, [(b, cholmodjax.MODE_A)], want_logdet=True
+        cholgraph.clear_cache()
+        c0 = cholgraph.factorization_count()
+        xs, ld = cholgraph.factor_solve(
+            Ai, Aj, Ax, [(b, cholgraph.MODE_A)], want_logdet=True
         )
         jax.block_until_ready(xs)
         np.testing.assert_allclose(xs[0], np.linalg.solve(A, b), rtol=1e-10)
         np.testing.assert_allclose(float(ld), np.linalg.slogdet(A)[1], rtol=1e-10)
         # mean + logdet came from a single factorization
-        assert cholmodjax.factorization_count() - c0 == 1
+        assert cholgraph.factorization_count() - c0 == 1
 
     def test_multiple_chains_one_factor(self, spd):
         """mean, a factor-part chain, and logdet — all from ONE factorization."""
@@ -287,24 +287,24 @@ class TestFactorSolve:
         rng = np.random.default_rng(21)
         b = rng.normal(size=n)
         z = rng.normal(size=n)
-        cholmodjax.clear_cache()
-        c0 = cholmodjax.factorization_count()
-        (mean, w), ld = cholmodjax.factor_solve(
+        cholgraph.clear_cache()
+        c0 = cholgraph.factorization_count()
+        (mean, w), ld = cholgraph.factor_solve(
             Ai, Aj, Ax,
-            [(b, cholmodjax.MODE_A), (z, (cholmodjax.MODE_LT, cholmodjax.MODE_PT))],
+            [(b, cholgraph.MODE_A), (z, (cholgraph.MODE_LT, cholgraph.MODE_PT))],
             want_logdet=True,
         )
         jax.block_until_ready((mean, w, ld))
-        assert cholmodjax.factorization_count() - c0 == 1
+        assert cholgraph.factorization_count() - c0 == 1
         np.testing.assert_allclose(mean, np.linalg.solve(A, b), rtol=1e-10)
         np.testing.assert_allclose(float(ld), np.linalg.slogdet(A)[1], rtol=1e-10)
         # w = P' L^-T z, so A w should equal L L' applied appropriately; check
         # the defining property Cov: w has A^{-1} covariance <=> (L' P w) == z.
         # Simpler exact check: separate calls reproduce the same w.
-        w_ref = cholmodjax.solve(
+        w_ref = cholgraph.solve(
             Ai, Aj, Ax,
-            cholmodjax.solve(Ai, Aj, Ax, z, mode=cholmodjax.MODE_LT),
-            mode=cholmodjax.MODE_PT,
+            cholgraph.solve(Ai, Aj, Ax, z, mode=cholgraph.MODE_LT),
+            mode=cholgraph.MODE_PT,
         )
         np.testing.assert_allclose(w, w_ref, rtol=1e-10)
 
@@ -314,15 +314,15 @@ class TestFactorSolve:
         rng = np.random.default_rng(22)
         b = rng.normal(size=n)
         c = rng.normal(size=n)
-        xs = cholmodjax.factor_solve(
-            Ai, Aj, Ax, [(b, cholmodjax.MODE_A), (c, cholmodjax.MODE_A)]
+        xs = cholgraph.factor_solve(
+            Ai, Aj, Ax, [(b, cholgraph.MODE_A), (c, cholgraph.MODE_A)]
         )
-        np.testing.assert_allclose(xs[0], cholmodjax.solve(Ai, Aj, Ax, b), rtol=1e-12)
-        np.testing.assert_allclose(xs[1], cholmodjax.solve(Ai, Aj, Ax, c), rtol=1e-12)
+        np.testing.assert_allclose(xs[0], cholgraph.solve(Ai, Aj, Ax, b), rtol=1e-12)
+        np.testing.assert_allclose(xs[1], cholgraph.solve(Ai, Aj, Ax, c), rtol=1e-12)
 
     def test_logdet_only_empty_rhs(self, spd):
         Ai, Aj, Ax, A = spd
-        (xs, ld) = cholmodjax.factor_solve(
+        (xs, ld) = cholgraph.factor_solve(
             Ai, Aj, Ax, [], want_logdet=True, n=A.shape[0]
         )
         assert xs == []
@@ -333,7 +333,7 @@ class TestFactorSolve:
         n = A.shape[0]
         rng = np.random.default_rng(23)
         B = rng.normal(size=(n, 3))
-        (X,) = cholmodjax.factor_solve(Ai, Aj, Ax, [(B, cholmodjax.MODE_A)])
+        (X,) = cholgraph.factor_solve(Ai, Aj, Ax, [(B, cholgraph.MODE_A)])
         np.testing.assert_allclose(X, np.linalg.solve(A, B), rtol=1e-10)
 
     def test_under_jit(self, spd):
@@ -345,10 +345,10 @@ class TestFactorSolve:
 
         @jax.jit
         def f(Ax, b, z):
-            (mean, w), ld = cholmodjax.factor_solve(
+            (mean, w), ld = cholgraph.factor_solve(
                 Ai, Aj, Ax,
-                [(b, cholmodjax.MODE_A),
-                 (z, (cholmodjax.MODE_LT, cholmodjax.MODE_PT))],
+                [(b, cholgraph.MODE_A),
+                 (z, (cholgraph.MODE_LT, cholgraph.MODE_PT))],
                 want_logdet=True,
             )
             return mean, w, ld
@@ -362,14 +362,14 @@ class TestFactorSolve:
         n = A.shape[0]
         rng = np.random.default_rng(25)
         bs = rng.normal(size=(6, n))
-        cholmodjax.clear_cache()
-        c0 = cholmodjax.factorization_count()
+        cholgraph.clear_cache()
+        c0 = cholgraph.factorization_count()
         xs = jax.vmap(
-            lambda b: cholmodjax.factor_solve(Ai, Aj, Ax, [(b, cholmodjax.MODE_A)])[0]
+            lambda b: cholgraph.factor_solve(Ai, Aj, Ax, [(b, cholgraph.MODE_A)])[0]
         )(bs)
         jax.block_until_ready(xs)
         # identical A across the batch -> value cache collapses to 1 factorization
-        assert cholmodjax.factorization_count() - c0 == 1
+        assert cholgraph.factorization_count() - c0 == 1
         for i in range(6):
             np.testing.assert_allclose(xs[i], np.linalg.solve(A, bs[i]), rtol=1e-10)
 
@@ -381,18 +381,18 @@ class TestFactorSolve:
         Axs = scales[:, None] * Ax
         zs = rng.normal(size=(4, n))
         b = rng.normal(size=n)
-        cholmodjax.clear_cache()
-        c0 = cholmodjax.factorization_count()
+        cholgraph.clear_cache()
+        c0 = cholgraph.factorization_count()
         f = jax.jit(
             jax.vmap(
-                lambda Ax, z: cholmodjax.sample_gaussian(Ai, Aj, Ax, b, z),
+                lambda Ax, z: cholgraph.sample_gaussian(Ai, Aj, Ax, b, z),
                 in_axes=(0, 0),
             )
         )
         etas, means = f(Axs, zs)
         jax.block_until_ready((etas, means))
         # 4 elements, each needs mean+sample+... but ONE factorization apiece
-        assert cholmodjax.factorization_count() - c0 == 4
+        assert cholgraph.factorization_count() - c0 == 4
         for i, s in enumerate(scales):
             np.testing.assert_allclose(
                 means[i], np.linalg.solve(s * A, b), rtol=1e-10
@@ -404,11 +404,11 @@ class TestFactorSolve:
         bs = np.ones((4, n))
         f = jax.jit(
             jax.vmap(
-                lambda b: cholmodjax.factor_solve(Ai, Aj, Ax, [(b, cholmodjax.MODE_A)])[0]
+                lambda b: cholgraph.factor_solve(Ai, Aj, Ax, [(b, cholgraph.MODE_A)])[0]
             )
         )
         hlo = f.lower(bs).compile().as_text()
-        assert hlo.count("cholmodjax_factor_solve_batched_f64") == 1
+        assert hlo.count("cholgraph_factor_solve_batched_f64") == 1
 
     def test_vmap_over_pattern_raises(self, spd):
         Ai, Aj, Ax, A = spd
@@ -417,7 +417,7 @@ class TestFactorSolve:
         b = np.ones(n)
         with pytest.raises(ValueError, match="sparsity pattern"):
             jax.vmap(
-                lambda Ai: cholmodjax.factor_solve(Ai, Aj, Ax, [(b, cholmodjax.MODE_A)])[0]
+                lambda Ai: cholgraph.factor_solve(Ai, Aj, Ax, [(b, cholgraph.MODE_A)])[0]
             )(Ais)
 
 
@@ -427,12 +427,12 @@ class TestSampleGaussian:
         n = A.shape[0]
         rng = np.random.default_rng(27)
         b = rng.normal(size=n)
-        eta, mean = cholmodjax.sample_gaussian(Ai, Aj, Ax, b, rng.normal(size=n))
+        eta, mean = cholgraph.sample_gaussian(Ai, Aj, Ax, b, rng.normal(size=n))
         np.testing.assert_allclose(mean, np.linalg.solve(A, b), rtol=1e-10)
         # empirical covariance of many draws ~ A^{-1}
         zs = rng.normal(size=(6000, n))
         etas = jax.vmap(
-            lambda z: cholmodjax.sample_gaussian(Ai, Aj, Ax, b, z)[0]
+            lambda z: cholgraph.sample_gaussian(Ai, Aj, Ax, b, z)[0]
         )(zs)
         emp = np.cov(np.asarray(etas).T)
         np.testing.assert_allclose(emp, np.linalg.inv(A), atol=0.05)
@@ -443,7 +443,7 @@ class TestSampleGaussian:
         rng = np.random.default_rng(28)
         b = rng.normal(size=n)
         z = rng.normal(size=n)
-        eta, mean, ld = cholmodjax.sample_gaussian(
+        eta, mean, ld = cholgraph.sample_gaussian(
             Ai, Aj, Ax, b, z, want_logdet=True
         )
         np.testing.assert_allclose(float(ld), np.linalg.slogdet(A)[1], rtol=1e-10)
@@ -461,24 +461,24 @@ class TestBCOO:
         M = self._bcoo(A)
         b = np.arange(1.0, A.shape[0] + 1.0)
         np.testing.assert_allclose(
-            cholmodjax.solve_bcoo(M, b), np.linalg.solve(A, b), rtol=1e-10
+            cholgraph.solve_bcoo(M, b), np.linalg.solve(A, b), rtol=1e-10
         )
 
     def test_solve_bcoo_jit_caches(self, spd):
         Ai, Aj, Ax, A = spd
         M = self._bcoo(A)
         b = np.ones(A.shape[0])
-        cholmodjax.clear_cache()
-        f = jax.jit(cholmodjax.solve_bcoo)
+        cholgraph.clear_cache()
+        f = jax.jit(cholgraph.solve_bcoo)
         f(M, b).block_until_ready()
         f(M, 2.0 * b).block_until_ready()
-        assert cholmodjax.cache_size() == 1  # same pattern reused
+        assert cholgraph.cache_size() == 1  # same pattern reused
 
     def test_logdet_bcoo(self, spd):
         Ai, Aj, Ax, A = spd
         M = self._bcoo(A)
         np.testing.assert_allclose(
-            float(cholmodjax.logdet_bcoo(M)),
+            float(cholgraph.logdet_bcoo(M)),
             np.linalg.slogdet(A)[1],
             rtol=1e-10,
         )
@@ -491,7 +491,7 @@ class TestBCOO:
         c = rng.normal(size=n)
         b = rng.normal(size=n)
         np.testing.assert_allclose(
-            cholmodjax.update_solve_bcoo(M, c, b),
+            cholgraph.update_solve_bcoo(M, c, b),
             np.linalg.solve(A + np.outer(c, c), b),
             rtol=1e-9,
         )
@@ -502,7 +502,7 @@ class TestBCOO:
         Ai, Aj, Ax, A = spd
         stacked = jsparse.BCOO.fromdense(jnp.stack([jnp.asarray(A)] * 2), n_batch=1)
         with pytest.raises(ValueError, match="n_batch"):
-            cholmodjax.solve_bcoo(stacked, np.ones(A.shape[0]))
+            cholgraph.solve_bcoo(stacked, np.ones(A.shape[0]))
 
 
 class TestAD:
@@ -513,7 +513,7 @@ class TestAD:
         w = np.linspace(-1.0, 1.0, n)  # nontrivial loss weights
 
         def loss(Ax, b):
-            return (w * cholmodjax.solve(Ai, Aj, Ax, b)).sum()
+            return (w * cholgraph.solve(Ai, Aj, Ax, b)).sum()
 
         gAx, gb = jax.grad(loss, argnums=(0, 1))(jnp.asarray(Ax), jnp.asarray(b))
 
@@ -541,8 +541,8 @@ class TestAD:
     def test_grad_under_jit(self, spd):
         Ai, Aj, Ax, A = spd
         b = np.ones(A.shape[0])
-        g1 = jax.grad(lambda Ax: cholmodjax.solve(Ai, Aj, Ax, b).sum())(jnp.asarray(Ax))
-        g2 = jax.jit(jax.grad(lambda Ax: cholmodjax.solve(Ai, Aj, Ax, b).sum()))(
+        g1 = jax.grad(lambda Ax: cholgraph.solve(Ai, Aj, Ax, b).sum())(jnp.asarray(Ax))
+        g2 = jax.jit(jax.grad(lambda Ax: cholgraph.solve(Ai, Aj, Ax, b).sum()))(
             jnp.asarray(Ax)
         )
         np.testing.assert_allclose(g1, g2, rtol=1e-12)
@@ -551,12 +551,12 @@ class TestAD:
 class TestLogdet:
     def test_logdet_matches_slogdet(self, spd):
         Ai, Aj, Ax, A = spd
-        ld = cholmodjax.logdet(Ai, Aj, Ax, A.shape[0])
+        ld = cholgraph.logdet(Ai, Aj, Ax, A.shape[0])
         np.testing.assert_allclose(float(ld), np.linalg.slogdet(A)[1], rtol=1e-10)
 
     def test_logdet_under_jit(self, spd):
         Ai, Aj, Ax, A = spd
-        f = jax.jit(lambda Ax: cholmodjax.logdet(Ai, Aj, Ax, A.shape[0]))
+        f = jax.jit(lambda Ax: cholgraph.logdet(Ai, Aj, Ax, A.shape[0]))
         for s in (1.0, 2.0):
             np.testing.assert_allclose(
                 float(f(s * Ax)), np.linalg.slogdet(s * A)[1], rtol=1e-10
@@ -567,7 +567,7 @@ class TestSelinv:
     def test_matches_dense_inverse_at_pattern(self, spd):
         Ai, Aj, Ax, A = spd
         n = A.shape[0]
-        z = np.asarray(cholmodjax.selinv(Ai, Aj, Ax, n))
+        z = np.asarray(cholgraph.selinv(Ai, Aj, Ax, n))
         Ainv = np.linalg.inv(A)
         # Selected inverse must match the dense inverse at every COO position,
         # for both upper- and lower-triangle entries (symmetry).
@@ -576,7 +576,7 @@ class TestSelinv:
     def test_diagonal_is_marginal_variance(self, spd):
         Ai, Aj, Ax, A = spd
         n = A.shape[0]
-        z = np.asarray(cholmodjax.selinv(Ai, Aj, Ax, n))
+        z = np.asarray(cholgraph.selinv(Ai, Aj, Ax, n))
         d = Ai == Aj
         # diag(A^-1) read off the diagonal COO entries.
         np.testing.assert_allclose(
@@ -587,13 +587,13 @@ class TestSelinv:
         Ai, Aj, Ax, A = spd
         keep = Ai <= Aj
         n = A.shape[0]
-        z = np.asarray(cholmodjax.selinv(Ai[keep], Aj[keep], Ax[keep], n))
+        z = np.asarray(cholgraph.selinv(Ai[keep], Aj[keep], Ax[keep], n))
         np.testing.assert_allclose(z, np.linalg.inv(A)[Ai[keep], Aj[keep]], atol=1e-10)
 
     def test_under_jit(self, spd):
         Ai, Aj, Ax, A = spd
         n = A.shape[0]
-        z = jax.jit(lambda Ax: cholmodjax.selinv(Ai, Aj, Ax, n))(jnp.asarray(Ax))
+        z = jax.jit(lambda Ax: cholgraph.selinv(Ai, Aj, Ax, n))(jnp.asarray(Ax))
         np.testing.assert_allclose(np.asarray(z), np.linalg.inv(A)[Ai, Aj], atol=1e-10)
 
 
@@ -601,7 +601,7 @@ class TestLogdetGrad:
     def test_grad_matches_finite_differences(self, spd):
         Ai, Aj, Ax, A = spd
         n = A.shape[0]
-        g = np.asarray(jax.grad(lambda x: cholmodjax.logdet(Ai, Aj, x, n))(jnp.asarray(Ax)))
+        g = np.asarray(jax.grad(lambda x: cholgraph.logdet(Ai, Aj, x, n))(jnp.asarray(Ax)))
 
         def dense_logdet(Axv):
             Ad = np.zeros_like(A)
@@ -624,7 +624,7 @@ class TestLogdetGrad:
         n = A.shape[0]
 
         def f(x):
-            return cholmodjax.logdet(Ai, Aj, x, n)
+            return cholgraph.logdet(Ai, Aj, x, n)
 
         g1 = jax.grad(f)(jnp.asarray(Ax))
         g2 = jax.jit(jax.grad(f))(jnp.asarray(Ax))
@@ -636,7 +636,7 @@ class TestLogdetGrad:
         Axb = jnp.stack([jnp.asarray(Ax) * (1.0 + 0.05 * i) for i in range(4)])
 
         def gf(x):
-            return jax.grad(lambda a: cholmodjax.logdet(Ai, Aj, a, n))(x)
+            return jax.grad(lambda a: cholgraph.logdet(Ai, Aj, a, n))(x)
 
         gb = jax.vmap(gf)(Axb)
         gref = jnp.stack([gf(Axb[i]) for i in range(4)])
@@ -650,8 +650,8 @@ class TestLogdetGrad:
         b = jnp.asarray(np.linspace(1.0, 2.0, n))
 
         def neg_log_post(x):
-            quad = b @ cholmodjax.solve(Ai, Aj, x, b)
-            return 0.5 * quad - 0.5 * cholmodjax.logdet(Ai, Aj, x, n)
+            quad = b @ cholgraph.solve(Ai, Aj, x, b)
+            return 0.5 * quad - 0.5 * cholgraph.logdet(Ai, Aj, x, n)
 
         g = np.asarray(jax.grad(neg_log_post)(jnp.asarray(Ax)))
 
@@ -680,11 +680,11 @@ class TestSolveModes:
         b = np.arange(1.0, A.shape[0] + 1.0)
 
         def s(v, m):
-            return cholmodjax.solve(Ai, Aj, Ax, v, mode=m)
+            return cholgraph.solve(Ai, Aj, Ax, v, mode=m)
 
         chained = s(
-            s(s(s(b, cholmodjax.MODE_P), cholmodjax.MODE_L), cholmodjax.MODE_LT),
-            cholmodjax.MODE_PT,
+            s(s(s(b, cholgraph.MODE_P), cholgraph.MODE_L), cholgraph.MODE_LT),
+            cholgraph.MODE_PT,
         )
         np.testing.assert_allclose(chained, np.linalg.solve(A, b), rtol=1e-10)
 
@@ -695,11 +695,11 @@ class TestErrors:
         Aj = np.array([0, 1], dtype=np.int32)
         Ax = np.array([1.0, -1.0])  # indefinite
         with pytest.raises(Exception, match="positive definite"):
-            cholmodjax.solve(Ai, Aj, Ax, np.array([1.0, 1.0])).block_until_ready()
+            cholgraph.solve(Ai, Aj, Ax, np.array([1.0, 1.0])).block_until_ready()
 
     def test_mismatched_lengths(self):
         with pytest.raises(ValueError, match="equal lengths"):
-            cholmodjax.solve(
+            cholgraph.solve(
                 np.array([0], dtype=np.int32),
                 np.array([0, 1], dtype=np.int32),
                 np.array([1.0]),
@@ -711,24 +711,24 @@ class TestErrors:
         Aj = np.array([0, 5], dtype=np.int32)
         Ax = np.array([1.0, 1.0])
         with pytest.raises(Exception, match="out of range"):
-            cholmodjax.solve(Ai, Aj, Ax, np.array([1.0, 1.0])).block_until_ready()
+            cholgraph.solve(Ai, Aj, Ax, np.array([1.0, 1.0])).block_until_ready()
 
 
 class TestCache:
     def test_cache_grows_and_clears(self, spd):
-        cholmodjax.clear_cache()
-        assert cholmodjax.cache_size() == 0
+        cholgraph.clear_cache()
+        assert cholgraph.cache_size() == 0
         Ai, Aj, Ax, A = spd
         b = np.ones(A.shape[0])
-        cholmodjax.solve(Ai, Aj, Ax, b).block_until_ready()
-        assert cholmodjax.cache_size() == 1
-        cholmodjax.solve(Ai, Aj, 2.0 * Ax, b).block_until_ready()
-        assert cholmodjax.cache_size() == 1  # same pattern, no new entry
+        cholgraph.solve(Ai, Aj, Ax, b).block_until_ready()
+        assert cholgraph.cache_size() == 1
+        cholgraph.solve(Ai, Aj, 2.0 * Ax, b).block_until_ready()
+        assert cholgraph.cache_size() == 1  # same pattern, no new entry
         Bi, Bj, Bx, B = grid_laplacian(5)
-        cholmodjax.solve(Bi, Bj, Bx, np.ones(B.shape[0])).block_until_ready()
-        assert cholmodjax.cache_size() == 2
-        cholmodjax.clear_cache()
-        assert cholmodjax.cache_size() == 0
+        cholgraph.solve(Bi, Bj, Bx, np.ones(B.shape[0])).block_until_ready()
+        assert cholgraph.cache_size() == 2
+        cholgraph.clear_cache()
+        assert cholgraph.cache_size() == 0
 
 
 if __name__ == "__main__":

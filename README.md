@@ -1,4 +1,4 @@
-# cholmodjax
+# cholgraph
 
 JAX-native sparse Cholesky via [CHOLMOD](https://github.com/DrTimothyAldenDavis/SuiteSparse).
 Solves with symmetric positive definite sparse matrices run at full native speed
@@ -29,7 +29,7 @@ boundaries; the caching is transparent.
 
 ```bash
 conda env create -f environment.yml   # suitesparse, jax, nanobind, cmake, ...
-conda activate cholmodjax
+conda activate cholgraph
 pip install --no-build-isolation .
 ```
 
@@ -39,7 +39,7 @@ pip install --no-build-isolation .
 import jax
 import jax.numpy as jnp
 import numpy as np
-import cholmodjax
+import cholgraph
 
 jax.config.update("jax_enable_x64", True)   # required: CHOLMOD is float64
 
@@ -50,13 +50,13 @@ Aj = np.array([0, 1, 0, 1, 2, 1, 2], dtype=np.int32)
 Ax = jnp.array([4.0, 1.0, 1.0, 5.0, 2.0, 2.0, 6.0])
 b = jnp.array([1.0, 2.0, 3.0])
 
-x = cholmodjax.solve(Ai, Aj, Ax, b)          # eager
-ld = cholmodjax.logdet(Ai, Aj, Ax, n=3)      # log|A| from the same factorization
+x = cholgraph.solve(Ai, Aj, Ax, b)          # eager
+ld = cholgraph.logdet(Ai, Aj, Ax, n=3)      # log|A| from the same factorization
 
 @jax.jit                                      # ...or fully JIT-compiled
 def gibbs_step(Ax, b):
-    x = cholmodjax.solve(Ai, Aj, Ax, b)      # full CHOLMOD speed, no callbacks
-    ld = cholmodjax.logdet(Ai, Aj, Ax, n=3)  # factorization shared with solve
+    x = cholgraph.solve(Ai, Aj, Ax, b)      # full CHOLMOD speed, no callbacks
+    ld = cholgraph.logdet(Ai, Aj, Ax, n=3)  # factorization shared with solve
     return x, ld
 ```
 
@@ -71,7 +71,7 @@ Features:
   in C++ (reusing the cached analysis), rather than XLA per-iteration dispatch. Composes with
   `grad` (`vmap(grad(solve))` batches too). Map over `Ax`, `b`, or both.
 - **Multiple right-hand sides**: `b` may be `(n,)` or `(n, n_rhs)`.
-- **Factor-part solves**: `mode=cholmodjax.MODE_LT` etc. expose CHOLMOD's solve systems
+- **Factor-part solves**: `mode=cholgraph.MODE_LT` etc. expose CHOLMOD's solve systems
   (`P' L L' P = A`). Sampling `y ~ N(0, A^{-1})`:
   `y = solve(..., solve(..., z, mode=MODE_LT), mode=MODE_PT)`.
 - **Not positive definite** → runtime exception (the factor is always a true LL').
@@ -88,19 +88,19 @@ element**, whatever the number of chains.
 ```python
 # Gibbs Gaussian step: posterior mean, a draw ~ N(mean, A^-1), and log|A|,
 # from ONE factorization. eta = mean + P' L^-T z  (since A = P' L L' P).
-eta, mean, ld = cholmodjax.sample_gaussian(Ai, Aj, Ax, b, z, want_logdet=True)
+eta, mean, ld = cholgraph.sample_gaussian(Ai, Aj, Ax, b, z, want_logdet=True)
 
 # ...or spell it out with the general primitive:
-(mean, w), ld = cholmodjax.factor_solve(
+(mean, w), ld = cholgraph.factor_solve(
     Ai, Aj, Ax,
-    [(b, cholmodjax.MODE_A),                          # A^-1 b
-     (z, (cholmodjax.MODE_LT, cholmodjax.MODE_PT))],  # P' L^-T z  (chain)
+    [(b, cholgraph.MODE_A),                          # A^-1 b
+     (z, (cholgraph.MODE_LT, cholgraph.MODE_PT))],  # P' L^-T z  (chain)
     want_logdet=True)
 eta = mean + w
 ```
 
 Each `rhs` entry is `(b, modes)` where `modes` is one `MODE_*` or a sequence applied left to
-right. `cholmodjax.factorization_count()` reports how many real factorizations have happened —
+right. `cholgraph.factorization_count()` reports how many real factorizations have happened —
 handy for confirming the fusion. Benchmarked Gibbs draw (mean + sample + logdet) vmapped over a
 batch of *different* A's: **4× fewer factorizations and ~3.3–3.6× faster** than issuing the
 separate `solve`/`logdet` primitives. `factor_solve` is forward-only (no autodiff rule); use
@@ -115,8 +115,8 @@ sampling backend), VI, or empirical-Bayes/MAP optimization:
 
 ```python
 def neg_log_post(Ax):                                  # up to constants
-    quad = b @ cholmodjax.solve(Ai, Aj, Ax, b)         # b' A^-1 b   (solve VJP)
-    return 0.5 * quad - 0.5 * cholmodjax.logdet(Ai, Aj, Ax, n)   # log|A| (logdet VJP)
+    quad = b @ cholgraph.solve(Ai, Aj, Ax, b)         # b' A^-1 b   (solve VJP)
+    return 0.5 * quad - 0.5 * cholgraph.logdet(Ai, Aj, Ax, n)   # log|A| (logdet VJP)
 
 grad_Ax = jax.grad(neg_log_post)(Ax)                   # works under jit / vmap
 ```
@@ -127,7 +127,7 @@ recurrence](https://doi.org/10.1109/TPAS.1973.293720) over the Cholesky factor �
 never the dense inverse. That quantity is exposed directly:
 
 ```python
-z = cholmodjax.selinv(Ai, Aj, Ax, n)   # z[k] == (A^-1)[Ai[k], Aj[k]]
+z = cholgraph.selinv(Ai, Aj, Ax, n)   # z[k] == (A^-1)[Ai[k], Aj[k]]
 var = z[Ai == Aj]                      # diag(A^-1): Gaussian marginal variances
 ```
 
@@ -143,12 +143,12 @@ solve and log-determinant without going through JAX/XLA. It's an optional extra 
 the base package stays JAX-only:
 
 ```bash
-pip install "cholmodjax[pytensor]"
+pip install "cholgraph[pytensor]"
 ```
 
 ```python
 import pytensor.tensor as pt
-import cholmodjax.pytensor as cjpt
+import cholgraph.pytensor as cjpt
 
 Ax = pt.dvector("Ax")                 # the precision-matrix values (θ-dependent)
 # Gaussian log-density (up to constants); grad flows into Ax
@@ -158,10 +158,28 @@ g = pt.grad(logp, Ax)                 # solve VJP + logdet (selected-inverse) VJ
 
 `cjpt.solve`, `cjpt.logdet`, and `cjpt.selinv` mirror the JAX functions and carry
 the same reverse-mode rules (`solve` in `Ax`/`b`, `logdet` in `Ax`); the pattern
-`(Ai, Aj)` is non-differentiable data. The Ops are pure-Python `perform` calling
-the cached core, so they run under PyTensor's C backend (and, in object mode,
-numba); the CHOLMOD call dominates. On PyTensor ≥ 3.1 the gradient routes through
-`Op.pullback`; older versions use `grad`.
+`(Ai, Aj)` is non-differentiable data. On PyTensor ≥ 3.1 the gradient routes
+through `Op.pullback`; older versions use `grad`.
+
+### Use the C backend, not numba
+
+These Ops implement a pure-Python `perform` (it calls the native core, which
+holds no GIL and does the real work — the CHOLMOD call dominates). PyTensor's
+**C backend** (`FAST_RUN`, the default) calls that `perform` directly with no
+penalty. PyTensor's **numba backend** cannot JIT a Python `perform`, so it falls
+back to *object mode* and prints a `UserWarning` on every call — functionally
+correct but with per-call overhead. Prefer the C backend:
+
+```python
+import pytensor
+
+pytensor.config.mode = "FAST_RUN"     # C backend (default); avoids numba object mode
+# For PyMC, this is the default; if you sample through the numba/JAX linker
+# instead, drive NUTS via the JAX frontend (numpyro/blackjax) rather than these Ops.
+```
+
+Concretely: keep PyMC on its default sampler (C backend) to use these Ops, and
+switch to the JAX frontend above if you deliberately run PyMC's JAX/numba linker.
 
 ## JAX sparse (`BCOO`)
 
@@ -172,9 +190,9 @@ JAX's native sparse type is `jax.experimental.sparse.BCOO`, whose `.indices` is 
 from jax.experimental import sparse as jsparse
 A = jsparse.BCOO.fromdense(A_dense)         # or build however you like
 
-x  = cholmodjax.solve_bcoo(A, b)            # == solve(A.indices[:,0], A.indices[:,1], A.data, b)
-ld = cholmodjax.logdet_bcoo(A)
-x  = cholmodjax.update_solve_bcoo(A, c, b)  # rank-k update, as below
+x  = cholgraph.solve_bcoo(A, b)            # == solve(A.indices[:,0], A.indices[:,1], A.data, b)
+ld = cholgraph.logdet_bcoo(A)
+x  = cholgraph.update_solve_bcoo(A, c, b)  # rank-k update, as below
 ```
 
 The analysis-reuse speedup is unaffected: the pattern cache keys on the concrete index values
@@ -192,9 +210,9 @@ factored once; each call is `O(k · path)` where `path` is the elimination-tree 
 
 ```python
 # Add an observation (rank-1, sparse update column) and re-solve, cheaply:
-x = cholmodjax.update_solve(Ai, Aj, Ax, c, b)                 # (A + c c') x = b
-x = cholmodjax.update_solve(Ai, Aj, Ax, c, b, downdate=True)  # (A - c c') x = b
-x, ld = cholmodjax.update_solve(Ai, Aj, Ax, C, b, return_logdet=True)  # C is (n, k)
+x = cholgraph.update_solve(Ai, Aj, Ax, c, b)                 # (A + c c') x = b
+x = cholgraph.update_solve(Ai, Aj, Ax, c, b, downdate=True)  # (A - c c') x = b
+x, ld = cholgraph.update_solve(Ai, Aj, Ax, C, b, return_logdet=True)  # C is (n, k)
 ```
 
 **When it pays off:** the update column(s) `C` must be **sparse** (a few nonzeros — e.g. one
@@ -206,8 +224,8 @@ is never mutated, so `update_solve` is a pure function (works under `jit`; not d
 ## Options
 
 ```python
-cholmodjax.set_options(supernodal="simplicial")  # or "auto" (default), "supernodal"
-cholmodjax.clear_cache()                         # free cached factorizations
+cholgraph.set_options(supernodal="simplicial")  # or "auto" (default), "supernodal"
+cholgraph.clear_cache()                         # free cached factorizations
 ```
 
 For very sparse matrices (e.g. planar/grid graphs), `"simplicial"` often gives faster
@@ -227,7 +245,7 @@ CHOLMOD choose based on the matrix.
 - [x] Differentiable `logdet` (reverse-mode in `Ax`) and the `selinv` selected inverse
       (Takahashi recurrence over the factor); pairs with `solve`'s VJP for full
       Gaussian log-density gradients
-- [x] PyTensor frontend (`cholmodjax.pytensor`, optional extra) with matching autodiff,
+- [x] PyTensor frontend (`cholgraph.pytensor`, optional extra) with matching autodiff,
       for PyMC's default backend / NUTS — a second frontend over the same CHOLMOD core
 - [ ] float32 (CHOLMOD 5 single precision) and int64 indices
 - [ ] Autodiff rule for `factor_solve` (currently forward-only)

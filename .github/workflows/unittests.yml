@@ -52,11 +52,11 @@ jobs:
            -r a \
            -n auto \
            --color yes \
-           --cov src/cholmodjax \
+           --cov src/cholgraph \
            --cov-append \
            --cov-report term-missing \
            --cov-report xml \
-           cholmodjax
+           cholgraph
       - name: codecov
         uses: codecov/codecov-action@v5
         with:

@@ -3,7 +3,7 @@ requires = ["scikit-build-core>=0.10", "nanobind>=2.0"]
 build-backend = "scikit_build_core.build"
 
 [project]
-name = "cholmodjax"
+name = "cholgraph"
 version = "0.6.0"
 description = "JAX-native sparse Cholesky factorization using CHOLMOD"
 readme = "README.md"
@@ -16,10 +16,10 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ["pytest"]
-# Optional PyTensor frontend (cholmodjax.pytensor) for PyMC's default backend,
+# Optional PyTensor frontend (cholgraph.pytensor) for PyMC's default backend,
 # including gradient-based samplers (NUTS). The base package stays JAX-only.
 pytensor = ["pytensor>=2.18"]
 
 [tool.scikit-build]
 cmake.build-type = "Release"
-wheel.packages = ["src/cholmodjax"]
+wheel.packages = ["src/cholgraph"]

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(cholmodjax LANGUAGES CXX)
+project(cholgraph LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -41,16 +41,16 @@ execute_process(
 list(APPEND CMAKE_PREFIX_PATH "${NANOBIND_CMAKE_DIR}")
 find_package(nanobind REQUIRED CONFIG)
 
-nanobind_add_module(cholmodjax_cpp src/cpp/cholmodjax.cpp)
+nanobind_add_module(cholgraph_cpp src/cpp/cholgraph.cpp)
 
-target_include_directories(cholmodjax_cpp PRIVATE
+target_include_directories(cholgraph_cpp PRIVATE
     ${CHOLMOD_INCLUDE_DIR}
     ${XLA_FFI_INCLUDE_DIR})
-target_link_libraries(cholmodjax_cpp PRIVATE ${CHOLMOD_LIBRARY})
+target_link_libraries(cholgraph_cpp PRIVATE ${CHOLMOD_LIBRARY})
 
 # conda's libcholmod has an @rpath install name; point the module at it.
-set_target_properties(cholmodjax_cpp PROPERTIES
+set_target_properties(cholgraph_cpp PROPERTIES
     BUILD_WITH_INSTALL_RPATH TRUE
     INSTALL_RPATH "${CHOLMOD_PREFIX}/lib")
 
-install(TARGETS cholmodjax_cpp LIBRARY DESTINATION .)
+install(TARGETS cholgraph_cpp LIBRARY DESTINATION .)
