@@ -14,3 +14,4 @@ dependencies:
   - scikit-build-core
   - pytest
   - cxx-compiler
+  - pytensor

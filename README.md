@@ -63,7 +63,10 @@ def gibbs_step(Ax, b):
 Features:
 
 - **`jit` / `lax.scan`**: the symbolic analysis is computed once and reused across iterations.
-- **Autodiff**: `solve` has a custom VJP (reverse-mode) in both `Ax` and `b`.
+- **Autodiff**: `solve` has a custom VJP (reverse-mode) in both `Ax` and `b`;
+  `logdet` has one in `Ax` (via the selected inverse — see below). Together they
+  give the gradient of a Gaussian log-density, so the precision matrix's values
+  can be fit by gradient-based inference (HMC/NUTS, empirical Bayes).
 - **`vmap`**: `jax.vmap(solve)` lowers to a *single* native FFI call that loops over the batch
   in C++ (reusing the cached analysis), rather than XLA per-iteration dispatch. Composes with
   `grad` (`vmap(grad(solve))` batches too). Map over `Ax`, `b`, or both.
@@ -102,6 +105,63 @@ handy for confirming the fusion. Benchmarked Gibbs draw (mean + sample + logdet)
 batch of *different* A's: **4× fewer factorizations and ~3.3–3.6× faster** than issuing the
 separate `solve`/`logdet` primitives. `factor_solve` is forward-only (no autodiff rule); use
 `solve`/`logdet` when you need gradients.
+
+## Gradients & the selected inverse
+
+`solve` and `logdet` are the two halves of a Gaussian log-density's gradient, so
+a precision matrix `A(θ)` with a fixed pattern and θ-dependent values can be fit
+by gradient-based inference — HMC/NUTS (e.g. via numpyro/blackjax, or PyMC's JAX
+sampling backend), VI, or empirical-Bayes/MAP optimization:
+
+```python
+def neg_log_post(Ax):                                  # up to constants
+    quad = b @ cholmodjax.solve(Ai, Aj, Ax, b)         # b' A^-1 b   (solve VJP)
+    return 0.5 * quad - 0.5 * cholmodjax.logdet(Ai, Aj, Ax, n)   # log|A| (logdet VJP)
+
+grad_Ax = jax.grad(neg_log_post)(Ax)                   # works under jit / vmap
+```
+
+`logdet`'s reverse-mode rule uses that `d log|A| / dA = A^{-1}`, evaluated **only
+at `A`'s sparsity pattern** by [Takahashi's selected-inversion
+recurrence](https://doi.org/10.1109/TPAS.1973.293720) over the Cholesky factor —
+never the dense inverse. That quantity is exposed directly:
+
+```python
+z = cholmodjax.selinv(Ai, Aj, Ax, n)   # z[k] == (A^-1)[Ai[k], Aj[k]]
+var = z[Ai == Aj]                      # diag(A^-1): Gaussian marginal variances
+```
+
+`selinv` shares the factorization cache, is JIT-compilable and `vmap`-able, and
+costs one selected-inversion pass over the factor (`O(nnz(L))`-ish), not `n`
+solves. `factor_solve` / `sample_gaussian` remain forward-only.
+
+## PyMC / PyTensor (NUTS)
+
+The same CHOLMOD core is exposed as a **PyTensor** frontend for PyMC's default
+backend, so gradient-based samplers (NUTS) can differentiate through the sparse
+solve and log-determinant without going through JAX/XLA. It's an optional extra —
+the base package stays JAX-only:
+
+```bash
+pip install "cholmodjax[pytensor]"
+```
+
+```python
+import pytensor.tensor as pt
+import cholmodjax.pytensor as cjpt
+
+Ax = pt.dvector("Ax")                 # the precision-matrix values (θ-dependent)
+# Gaussian log-density (up to constants); grad flows into Ax
+logp = -0.5 * pt.dot(b, cjpt.solve(Ai, Aj, Ax, b)) + 0.5 * cjpt.logdet(Ai, Aj, Ax, n)
+g = pt.grad(logp, Ax)                 # solve VJP + logdet (selected-inverse) VJP
+```
+
+`cjpt.solve`, `cjpt.logdet`, and `cjpt.selinv` mirror the JAX functions and carry
+the same reverse-mode rules (`solve` in `Ax`/`b`, `logdet` in `Ax`); the pattern
+`(Ai, Aj)` is non-differentiable data. The Ops are pure-Python `perform` calling
+the cached core, so they run under PyTensor's C backend (and, in object mode,
+numba); the CHOLMOD call dominates. On PyTensor ≥ 3.1 the gradient routes through
+`Op.pullback`; older versions use `grad`.
 
 ## JAX sparse (`BCOO`)
 
@@ -164,6 +224,11 @@ CHOLMOD choose based on the matrix.
       LL'→LDL' conversion is paid once per base change, not once per call
 - [x] `factor_solve` / `sample_gaussian`: factor once, serve many solve chains + logdet from
       one factor; fuses under `vmap` to one factorization per batch element
+- [x] Differentiable `logdet` (reverse-mode in `Ax`) and the `selinv` selected inverse
+      (Takahashi recurrence over the factor); pairs with `solve`'s VJP for full
+      Gaussian log-density gradients
+- [x] PyTensor frontend (`cholmodjax.pytensor`, optional extra) with matching autodiff,
+      for PyMC's default backend / NUTS — a second frontend over the same CHOLMOD core
 - [ ] float32 (CHOLMOD 5 single precision) and int64 indices
 - [ ] Autodiff rule for `factor_solve` (currently forward-only)
 - [ ] Wheels / conda-forge packaging

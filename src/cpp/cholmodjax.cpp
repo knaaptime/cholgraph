@@ -16,6 +16,7 @@
 
 #include <cholmod.h>
 #include <nanobind/nanobind.h>
+#include <nanobind/ndarray.h>
 
 #include <algorithm>
 #include <cmath>
@@ -23,6 +24,7 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -313,6 +315,20 @@ static bool factorize_locked(PatternEntry* e, const double* Ax, int64_t nnz,
   e->factor_epoch++;  // invalidates any cached simplicial copy (Lldl)
   g_num_factorizations++;
   return true;
+}
+
+// Look up (or build) the pattern entry and (re)factorize it, throwing a Python
+// exception on failure. For the numpy-callable core functions (used by non-JAX
+// frontends such as the PyTensor Ops), which report errors via exceptions
+// rather than ffi::Error. Caller must hold g_mutex.
+static PatternEntry* prepare_entry_locked(const int32_t* Ai, const int32_t* Aj,
+                                          const double* Ax, int64_t nnz,
+                                          int64_t n) {
+  std::string err;
+  PatternEntry* e = get_or_create_entry_locked(Ai, Aj, nnz, n, &err);
+  if (!e) throw std::runtime_error(err);
+  if (!factorize_locked(e, Ax, nnz, &err)) throw std::runtime_error(err);
+  return e;
 }
 
 // Solve L L' x = b for one right-hand side block using factor L and the
@@ -730,6 +746,146 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(CholmodFactorSolveBatchedF64,
                                   .Attr<int64_t>("n"));
 
 // ---------------------------------------------------------------------------
+// Simplicial LDL' base factor (Lldl). cholmod_updown and the selected-inverse
+// recurrence both need an LDL' (not LL', not supernodal) factor. Lldl is a
+// persistent simplicial LDL' copy of the base factor L, rebuilt only when the
+// base is refactored (tracked by epoch), so the LL'->LDL' conversion is paid
+// once per base change rather than once per call.
+// ---------------------------------------------------------------------------
+
+static ffi::Error ensure_ldl_locked(PatternEntry* e) {
+  if (e->Lldl && e->ldl_epoch == e->factor_epoch) return ffi::Error::Success();
+  if (e->Lldl) cholmod_free_factor(&e->Lldl, &g_common);
+  e->Lldl = cholmod_copy_factor(e->L, &g_common);
+  if (!e->Lldl)
+    return ffi::Error::Internal("cholmodjax: cholmod_copy_factor failed");
+  if (!cholmod_change_factor(CHOLMOD_REAL, /*to_ll=*/0, /*to_super=*/0,
+                             /*to_packed=*/1, /*to_monotonic=*/1, e->Lldl,
+                             &g_common))
+    return ffi::Error::Internal("cholmodjax: cholmod_change_factor failed");
+  e->ldl_epoch = e->factor_epoch;
+  return ffi::Error::Success();
+}
+
+// ---------------------------------------------------------------------------
+// selected-inverse handler:  (Ai, Aj, Ax; n) -> z[nnz]
+//     z[k] = (A^{-1})[Ai[k], Aj[k]]
+//
+// Computes the entries of A^{-1} that lie in the pattern of A (a subset of the
+// factor's fill pattern) via Takahashi's recurrence on the LDL' factor, without
+// forming the dense inverse. This is exactly what logdet's reverse-mode rule
+// needs: d log|A| / d A = A^{-1}, so d log|A| / d Ax[k] is (A^{-1}) at the COO
+// position (Ai[k], Aj[k]) (see the custom_vjp in Python for the symmetric
+// doubling of off-diagonal entries).
+//
+// Recurrence (A = P' L D L' P, L unit lower-triangular, D diagonal; work in the
+// permuted space, then map back through Perm). Processing columns j = n-1..0,
+// with below-diagonal pattern rows r_0<...<r_{p-1} of column j and l_b=L[r_b,j]:
+//     Z[r_a, j] = - sum_b l_b * Z[r_a, r_b]           (selected inverse Z)
+//     Z[j, j]   = 1/D[j] - sum_a l_a * Z[r_a, j]
+// The pairs (r_a, r_b) are all in the factor's pattern (fill closure), so the
+// recurrence stays within the stored structure.
+// ---------------------------------------------------------------------------
+
+static ffi::Error selinv_locked(PatternEntry* e, int64_t nnz, double* z) {
+  ffi::Error r = ensure_ldl_locked(e);
+  if (r.failure()) return r;
+  cholmod_factor* L = e->Lldl;
+  int64_t n = static_cast<int64_t>(L->n);
+  const int32_t* Lp = static_cast<const int32_t*>(L->p);
+  const int32_t* Li = static_cast<const int32_t*>(L->i);
+  const double* Lx = static_cast<const double*>(L->x);
+  const int32_t* Perm = static_cast<const int32_t*>(L->Perm);
+
+  std::vector<double> Z(Lp[n], 0.0);  // selected inverse, same structure as L
+  std::vector<double> work(n, 0.0);   // dense scatter workspace (kept zeroed)
+  std::vector<double> acc;
+
+  for (int64_t j = n - 1; j >= 0; --j) {
+    int64_t ps = Lp[j], pe = Lp[j + 1];
+    int64_t cnt = pe - ps - 1;  // below-diagonal entries of column j
+    // acc[a] = sum_b L[r_b, j] * Z[r_a, r_b], accumulated symmetrically so that
+    // each column of Z is scattered into `work` exactly once.
+    acc.assign(cnt, 0.0);
+    for (int64_t b = 0; b < cnt; ++b) {
+      int64_t c = Li[ps + 1 + b];  // r_b: column of Z to scatter
+      double lb = Lx[ps + 1 + b];
+      int64_t cs = Lp[c], ce = Lp[c + 1];
+      work[c] = Z[cs];  // Z[c, c]
+      for (int64_t t = cs + 1; t < ce; ++t) work[Li[t]] = Z[t];
+      for (int64_t a = b; a < cnt; ++a) {
+        double za = work[Li[ps + 1 + a]];  // Z[r_a, r_b], r_a >= r_b (stored)
+        acc[a] += lb * za;
+        if (a != b) acc[b] += Lx[ps + 1 + a] * za;  // symmetric partner
+      }
+      work[c] = 0.0;  // restore workspace to all-zero
+      for (int64_t t = cs + 1; t < ce; ++t) work[Li[t]] = 0.0;
+    }
+    double diag = 1.0 / Lx[ps];  // 1/D[j]
+    for (int64_t a = 0; a < cnt; ++a) {
+      double zaj = -acc[a];
+      Z[ps + 1 + a] = zaj;
+      diag -= Lx[ps + 1 + a] * zaj;
+    }
+    Z[ps] = diag;
+  }
+
+  // Z is A^{-1} in the permuted space: Z[u,v] = (A^{-1})[Perm[u], Perm[v]].
+  // Map each COO position back through the inverse permutation.
+  std::vector<int32_t> iperm(n);
+  for (int64_t k = 0; k < n; ++k) iperm[Perm[k]] = static_cast<int32_t>(k);
+  const int32_t* Ai = e->Ai.data();
+  const int32_t* Aj = e->Aj.data();
+  for (int64_t k = 0; k < nnz; ++k) {
+    int64_t u = iperm[Ai[k]], v = iperm[Aj[k]];
+    if (u < v) std::swap(u, v);  // stored entry lives in column min, row max
+    double val = 0.0;
+    if (u == v) {
+      val = Z[Lp[v]];
+    } else {
+      for (int64_t t = Lp[v] + 1, te = Lp[v + 1]; t < te; ++t)
+        if (Li[t] == u) {
+          val = Z[t];
+          break;
+        }
+    }
+    z[k] = val;
+  }
+  return ffi::Error::Success();
+}
+
+static ffi::Error SelinvF64Impl(ffi::Buffer<ffi::S32> Ai,
+                                ffi::Buffer<ffi::S32> Aj,
+                                ffi::Buffer<ffi::F64> Ax,
+                                ffi::ResultBuffer<ffi::F64> z, int64_t n) {
+  int64_t nnz = static_cast<int64_t>(Ai.element_count());
+  if (static_cast<int64_t>(Aj.element_count()) != nnz ||
+      static_cast<int64_t>(Ax.element_count()) != nnz)
+    return ffi::Error::InvalidArgument(
+        "cholmodjax: Ai, Aj, Ax must have the same length");
+
+  std::lock_guard<std::mutex> lock(g_mutex);
+  ensure_started_locked();
+
+  std::string err;
+  PatternEntry* e =
+      get_or_create_entry_locked(Ai.typed_data(), Aj.typed_data(), nnz, n, &err);
+  if (!e) return ffi::Error::InvalidArgument(err);
+  if (!factorize_locked(e, Ax.typed_data(), nnz, &err))
+    return ffi::Error::Internal(err);
+
+  return selinv_locked(e, nnz, z->typed_data());
+}
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(CholmodSelinvF64, SelinvF64Impl,
+                              ffi::Ffi::Bind()
+                                  .Arg<ffi::Buffer<ffi::S32>>()   // Ai
+                                  .Arg<ffi::Buffer<ffi::S32>>()   // Aj
+                                  .Arg<ffi::Buffer<ffi::F64>>()   // Ax
+                                  .Ret<ffi::Buffer<ffi::F64>>()   // z [nnz]
+                                  .Attr<int64_t>("n"));
+
+// ---------------------------------------------------------------------------
 // updown-solve handler:  (Ai, Aj, Ax, C[n,k], b[n(,nrhs)]; mode, downdate)
 //     -> x solving (A ± C C') x = b, and out_logdet = log|A ± C C'|.
 //
@@ -779,22 +935,12 @@ static ffi::Error UpdownSolveF64Impl(ffi::Buffer<ffi::S32> Ai,
     return ffi::Error::Internal(err);
 
   // cholmod_updown requires a simplicial LDL' factor (it cannot update a
-  // supernodal or LL' factor). Maintain Lldl, a persistent simplicial LDL' copy
-  // of the base factor, rebuilt only when the base is refactored — so the
-  // LL'->LDL' conversion is paid once per base change, not once per call. The
-  // per-call working copy Lupd (which updown mutates) is then a plain
-  // simplicial->simplicial copy of Lldl, leaving the base factor pristine.
-  if (!e->Lldl || e->ldl_epoch != e->factor_epoch) {
-    if (e->Lldl) cholmod_free_factor(&e->Lldl, &g_common);
-    e->Lldl = cholmod_copy_factor(e->L, &g_common);
-    if (!e->Lldl)
-      return ffi::Error::Internal("cholmodjax: cholmod_copy_factor failed");
-    if (!cholmod_change_factor(CHOLMOD_REAL, /*to_ll=*/0, /*to_super=*/0,
-                               /*to_packed=*/1, /*to_monotonic=*/1, e->Lldl,
-                               &g_common))
-      return ffi::Error::Internal("cholmodjax: cholmod_change_factor failed");
-    e->ldl_epoch = e->factor_epoch;
-  }
+  // supernodal or LL' factor). Lldl is a persistent simplicial LDL' copy of the
+  // base factor (rebuilt only on refactor); the per-call working copy Lupd
+  // (which updown mutates) is a plain simplicial->simplicial copy of Lldl,
+  // leaving the base factor pristine.
+  ffi::Error ldl_err = ensure_ldl_locked(e);
+  if (ldl_err.failure()) return ldl_err;
 
   if (e->Lupd) cholmod_free_factor(&e->Lupd, &g_common);
   e->Lupd = cholmod_copy_factor(e->Lldl, &g_common);
@@ -858,6 +1004,84 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(CholmodUpdownSolveF64, UpdownSolveF64Impl,
                                   .Attr<int64_t>("downdate"));
 
 // ---------------------------------------------------------------------------
+// Numpy-callable core (framework-agnostic, no XLA). These call the same cached
+// CHOLMOD core as the FFI handlers but take and return plain numpy arrays, so
+// non-JAX frontends — the PyTensor Ops in cholmodjax.pytensor — can reach the
+// solver and its selected-inverse gradient without going through XLA. Errors
+// are raised as Python exceptions.
+// ---------------------------------------------------------------------------
+
+using ArrI32 =
+    nb::ndarray<const int32_t, nb::ndim<1>, nb::c_contig, nb::device::cpu>;
+using ArrF64 = nb::ndarray<const double, nb::c_contig, nb::device::cpu>;
+
+static void check_coo_np(const ArrI32& Ai, const ArrI32& Aj, const ArrF64& Ax,
+                         int64_t nnz) {
+  if (static_cast<int64_t>(Aj.shape(0)) != nnz || Ax.ndim() != 1 ||
+      static_cast<int64_t>(Ax.shape(0)) != nnz)
+    throw std::runtime_error(
+        "cholmodjax: Ai, Aj, Ax must be 1D with the same length");
+}
+
+static nb::ndarray<nb::numpy, double> solve_np(ArrI32 Ai, ArrI32 Aj, ArrF64 Ax,
+                                               ArrF64 b, int64_t mode) {
+  int64_t nnz = static_cast<int64_t>(Ai.shape(0));
+  check_coo_np(Ai, Aj, Ax, nnz);
+  if (b.ndim() < 1 || b.ndim() > 2)
+    throw std::runtime_error("cholmodjax: b must be 1D or 2D");
+  if (mode < 0 || mode > 8)
+    throw std::runtime_error("cholmodjax: invalid solve mode");
+  int64_t n = static_cast<int64_t>(b.shape(0));
+  int64_t nrhs = b.ndim() == 2 ? static_cast<int64_t>(b.shape(1)) : 1;
+
+  double* out = new double[static_cast<size_t>(n) * nrhs];
+  nb::capsule owner(out,
+                    [](void* p) noexcept { delete[] static_cast<double*>(p); });
+  {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    ensure_started_locked();
+    PatternEntry* e =
+        prepare_entry_locked(Ai.data(), Aj.data(), Ax.data(), nnz, n);
+    std::vector<double> scratch;
+    ffi::Error r = solve_one_locked(e, e->L, static_cast<int>(mode), b.data(), n,
+                                    nrhs, out, &scratch);
+    if (r.failure()) throw std::runtime_error("cholmodjax: solve failed");
+  }
+  if (b.ndim() == 2)
+    return nb::ndarray<nb::numpy, double>(
+        out, {static_cast<size_t>(n), static_cast<size_t>(nrhs)}, owner);
+  return nb::ndarray<nb::numpy, double>(out, {static_cast<size_t>(n)}, owner);
+}
+
+static double logdet_np(ArrI32 Ai, ArrI32 Aj, ArrF64 Ax, int64_t n) {
+  int64_t nnz = static_cast<int64_t>(Ai.shape(0));
+  check_coo_np(Ai, Aj, Ax, nnz);
+  std::lock_guard<std::mutex> lock(g_mutex);
+  ensure_started_locked();
+  PatternEntry* e =
+      prepare_entry_locked(Ai.data(), Aj.data(), Ax.data(), nnz, n);
+  return e->logdet;
+}
+
+static nb::ndarray<nb::numpy, double> selinv_np(ArrI32 Ai, ArrI32 Aj, ArrF64 Ax,
+                                                int64_t n) {
+  int64_t nnz = static_cast<int64_t>(Ai.shape(0));
+  check_coo_np(Ai, Aj, Ax, nnz);
+  double* out = new double[nnz > 0 ? static_cast<size_t>(nnz) : 1];
+  nb::capsule owner(out,
+                    [](void* p) noexcept { delete[] static_cast<double*>(p); });
+  {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    ensure_started_locked();
+    PatternEntry* e =
+        prepare_entry_locked(Ai.data(), Aj.data(), Ax.data(), nnz, n);
+    ffi::Error r = selinv_locked(e, nnz, out);
+    if (r.failure()) throw std::runtime_error("cholmodjax: selinv failed");
+  }
+  return nb::ndarray<nb::numpy, double>(out, {static_cast<size_t>(nnz)}, owner);
+}
+
+// ---------------------------------------------------------------------------
 // nanobind module
 // ---------------------------------------------------------------------------
 
@@ -873,6 +1097,9 @@ NB_MODULE(cholmodjax_cpp, m) {
   m.def("logdet_f64_capsule", []() {
     return nb::capsule(reinterpret_cast<void*>(CholmodLogdetF64));
   });
+  m.def("selinv_f64_capsule", []() {
+    return nb::capsule(reinterpret_cast<void*>(CholmodSelinvF64));
+  });
   m.def("updown_solve_f64_capsule", []() {
     return nb::capsule(reinterpret_cast<void*>(CholmodUpdownSolveF64));
   });
@@ -882,6 +1109,11 @@ NB_MODULE(cholmodjax_cpp, m) {
   m.def("factor_solve_batched_f64_capsule", []() {
     return nb::capsule(reinterpret_cast<void*>(CholmodFactorSolveBatchedF64));
   });
+
+  // Numpy-callable core, for non-JAX frontends (cholmodjax.pytensor).
+  m.def("solve_np", &solve_np);
+  m.def("logdet_np", &logdet_np);
+  m.def("selinv_np", &selinv_np);
 
   // Total numeric (re)factorizations performed, for tests/introspection.
   m.def("factorization_count", []() {

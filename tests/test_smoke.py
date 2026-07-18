@@ -563,6 +563,116 @@ class TestLogdet:
             )
 
 
+class TestSelinv:
+    def test_matches_dense_inverse_at_pattern(self, spd):
+        Ai, Aj, Ax, A = spd
+        n = A.shape[0]
+        z = np.asarray(cholmodjax.selinv(Ai, Aj, Ax, n))
+        Ainv = np.linalg.inv(A)
+        # Selected inverse must match the dense inverse at every COO position,
+        # for both upper- and lower-triangle entries (symmetry).
+        np.testing.assert_allclose(z, Ainv[Ai, Aj], atol=1e-10)
+
+    def test_diagonal_is_marginal_variance(self, spd):
+        Ai, Aj, Ax, A = spd
+        n = A.shape[0]
+        z = np.asarray(cholmodjax.selinv(Ai, Aj, Ax, n))
+        d = Ai == Aj
+        # diag(A^-1) read off the diagonal COO entries.
+        np.testing.assert_allclose(
+            z[d][np.argsort(Ai[d])], np.diag(np.linalg.inv(A)), atol=1e-10
+        )
+
+    def test_upper_only_input(self, spd):
+        Ai, Aj, Ax, A = spd
+        keep = Ai <= Aj
+        n = A.shape[0]
+        z = np.asarray(cholmodjax.selinv(Ai[keep], Aj[keep], Ax[keep], n))
+        np.testing.assert_allclose(z, np.linalg.inv(A)[Ai[keep], Aj[keep]], atol=1e-10)
+
+    def test_under_jit(self, spd):
+        Ai, Aj, Ax, A = spd
+        n = A.shape[0]
+        z = jax.jit(lambda Ax: cholmodjax.selinv(Ai, Aj, Ax, n))(jnp.asarray(Ax))
+        np.testing.assert_allclose(np.asarray(z), np.linalg.inv(A)[Ai, Aj], atol=1e-10)
+
+
+class TestLogdetGrad:
+    def test_grad_matches_finite_differences(self, spd):
+        Ai, Aj, Ax, A = spd
+        n = A.shape[0]
+        g = np.asarray(jax.grad(lambda x: cholmodjax.logdet(Ai, Aj, x, n))(jnp.asarray(Ax)))
+
+        def dense_logdet(Axv):
+            Ad = np.zeros_like(A)
+            for k in range(len(Ai)):
+                if Ai[k] <= Aj[k]:
+                    Ad[Ai[k], Aj[k]] = Axv[k]
+                    Ad[Aj[k], Ai[k]] = Axv[k]
+            return np.linalg.slogdet(Ad)[1]
+
+        eps = 1e-6
+        rng = np.random.default_rng(5)
+        for k in rng.choice(len(Ax), size=12, replace=False):
+            e = np.zeros_like(Ax)
+            e[k] = eps
+            fd = (dense_logdet(Ax + e) - dense_logdet(Ax - e)) / (2 * eps)
+            np.testing.assert_allclose(g[k], fd, atol=1e-5)
+
+    def test_grad_under_jit(self, spd):
+        Ai, Aj, Ax, A = spd
+        n = A.shape[0]
+
+        def f(x):
+            return cholmodjax.logdet(Ai, Aj, x, n)
+
+        g1 = jax.grad(f)(jnp.asarray(Ax))
+        g2 = jax.jit(jax.grad(f))(jnp.asarray(Ax))
+        np.testing.assert_allclose(g1, g2, rtol=1e-12)
+
+    def test_vmap_grad(self, spd):
+        Ai, Aj, Ax, A = spd
+        n = A.shape[0]
+        Axb = jnp.stack([jnp.asarray(Ax) * (1.0 + 0.05 * i) for i in range(4)])
+
+        def gf(x):
+            return jax.grad(lambda a: cholmodjax.logdet(Ai, Aj, a, n))(x)
+
+        gb = jax.vmap(gf)(Axb)
+        gref = jnp.stack([gf(Axb[i]) for i in range(4)])
+        np.testing.assert_allclose(np.asarray(gb), np.asarray(gref), rtol=1e-10)
+
+    def test_gaussian_log_posterior_gradient(self, spd):
+        """The NUTS use case: grad of -1/2 b'A^-1 b + 1/2 log|A| combines the
+        solve VJP (quadratic term) and the logdet VJP (selected inverse)."""
+        Ai, Aj, Ax, A = spd
+        n = A.shape[0]
+        b = jnp.asarray(np.linspace(1.0, 2.0, n))
+
+        def neg_log_post(x):
+            quad = b @ cholmodjax.solve(Ai, Aj, x, b)
+            return 0.5 * quad - 0.5 * cholmodjax.logdet(Ai, Aj, x, n)
+
+        g = np.asarray(jax.grad(neg_log_post)(jnp.asarray(Ax)))
+
+        def dense(Axv):
+            Ad = np.zeros_like(A)
+            for k in range(len(Ai)):
+                if Ai[k] <= Aj[k]:
+                    Ad[Ai[k], Aj[k]] = Axv[k]
+                    Ad[Aj[k], Ai[k]] = Axv[k]
+            bn = np.asarray(b)
+            return 0.5 * bn @ np.linalg.solve(Ad, bn) - 0.5 * np.linalg.slogdet(Ad)[1]
+
+        eps = 1e-6
+        rng = np.random.default_rng(7)
+        for k in rng.choice(len(Ax), size=10, replace=False):
+            e = np.zeros_like(Ax)
+            e[k] = eps
+            fd = (dense(Ax + e) - dense(Ax - e)) / (2 * eps)
+            np.testing.assert_allclose(g[k], fd, atol=1e-5)
+
+
 class TestSolveModes:
     def test_factor_chain_equals_full_solve(self, spd):
         """P' L^-T L^-1 P b must equal A^-1 b."""

@@ -25,7 +25,9 @@ Example::
     def step(Ax, b):
         return cholmodjax.solve(Ai, Aj, Ax, b)   # full CHOLMOD speed in JIT
 
-``solve`` is differentiable in ``Ax`` and ``b`` (reverse mode). Under
+``solve`` is differentiable in ``Ax`` and ``b``, and ``logdet`` is
+differentiable in ``Ax`` (reverse mode) via the selected inverse (:func:`selinv`)
+— together the two pieces of a Gaussian log-density's gradient. Under
 ``jax.vmap`` the whole batch is solved in a single native FFI call that loops
 in C++ and reuses the cached analysis. :func:`update_solve` exposes CHOLMOD's
 rank-k update/downdate for cheap solves of ``(A ± C C') x = b`` with ``A`` held
@@ -38,10 +40,11 @@ import numpy as np
 
 import cholmodjax_cpp as _cpp
 
-__version__ = "0.4.0"
+__version__ = "0.6.0"
 __all__ = [
     "solve",
     "logdet",
+    "selinv",
     "factor_solve",
     "sample_gaussian",
     "update_solve",
@@ -73,6 +76,9 @@ jax.ffi.register_ffi_target(
 )
 jax.ffi.register_ffi_target(
     "cholmodjax_logdet_f64", _cpp.logdet_f64_capsule(), platform="cpu"
+)
+jax.ffi.register_ffi_target(
+    "cholmodjax_selinv_f64", _cpp.selinv_f64_capsule(), platform="cpu"
 )
 jax.ffi.register_ffi_target(
     "cholmodjax_updown_solve_f64",
@@ -224,6 +230,54 @@ def solve(Ai, Aj, Ax, b, mode=MODE_A):
     return _solve_a(Ax, b)
 
 
+def _logdet_ffi(Ai, Aj, Ax, n):
+    call = jax.ffi.ffi_call(
+        "cholmodjax_logdet_f64",
+        jax.ShapeDtypeStruct((), jnp.float64),
+        vmap_method="sequential",
+    )
+    return call(Ai, Aj, Ax, n=np.int64(n))
+
+
+def _selinv_ffi(Ai, Aj, Ax, n):
+    call = jax.ffi.ffi_call(
+        "cholmodjax_selinv_f64",
+        jax.ShapeDtypeStruct(Ax.shape, jnp.float64),
+        vmap_method="sequential",
+    )
+    return call(Ai, Aj, Ax, n=np.int64(n))
+
+
+def selinv(Ai, Aj, Ax, n):
+    """Selected inverse: entries of ``A^{-1}`` at ``A``'s sparsity pattern.
+
+    Returns ``z`` with ``z[k] == (A^{-1})[Ai[k], Aj[k]]``, computed by
+    Takahashi's recurrence on the Cholesky factor without ever forming the dense
+    inverse. Shares the factorization cache with :func:`solve` / :func:`logdet`.
+
+    This is the quantity :func:`logdet`'s reverse-mode rule uses
+    (``d log|A| / dA = A^{-1}``), exposed directly because the selected inverse
+    is useful on its own — e.g. posterior marginal variances ``diag(A^{-1})`` of
+    a Gaussian with precision ``A``, read off the ``Ai == Aj`` entries.
+
+    Args:
+        Ai, Aj, Ax: COO matrix as in :func:`solve`.
+        n: matrix dimension (static Python int).
+
+    Returns:
+        ``[n_nz]`` float64, aligned with ``Ax``: ``A^{-1}`` at each COO position.
+        Off-diagonal values are symmetric (``(A^{-1})[i, j] == (A^{-1})[j, i]``),
+        so entries below the diagonal carry the same value as their transpose.
+    """
+    _require_x64()
+    Ai = jnp.asarray(Ai, jnp.int32)
+    Aj = jnp.asarray(Aj, jnp.int32)
+    Ax = jnp.asarray(Ax, jnp.float64)
+    if Ai.ndim != 1 or Ai.shape != Aj.shape or Ax.shape != Ai.shape:
+        raise ValueError("Ai, Aj, Ax must be 1D with equal lengths")
+    return _selinv_ffi(Ai, Aj, Ax, int(n))
+
+
 def logdet(Ai, Aj, Ax, n):
     """Log-determinant of a symmetric positive definite sparse matrix.
 
@@ -231,23 +285,45 @@ def logdet(Ai, Aj, Ax, n):
     cache with :func:`solve`: a ``solve`` and a ``logdet`` with identical
     values factorize only once.
 
+    Differentiable in ``Ax`` (reverse mode). Since ``d log|A| / dA = A^{-1}``,
+    the gradient is the :func:`selinv` selected inverse at the COO positions
+    (with off-diagonal entries doubled for the symmetric pair), so it costs one
+    selected-inversion pass over the factor — no dense inverse. This makes
+    ``logdet`` usable inside a JAX log-density for gradient-based inference
+    (e.g. HMC/NUTS via numpyro/blackjax, or empirical-Bayes optimization of the
+    matrix values), pairing with :func:`solve`'s VJP for the quadratic-form term.
+
     Args:
         Ai, Aj, Ax: COO matrix as in :func:`solve`.
         n: matrix dimension (static Python int).
 
     Returns:
-        Scalar float64 ``log(det(A))``. Not differentiable.
+        Scalar float64 ``log(det(A))``.
     """
     _require_x64()
     Ai = jnp.asarray(Ai, jnp.int32)
     Aj = jnp.asarray(Aj, jnp.int32)
     Ax = jnp.asarray(Ax, jnp.float64)
-    call = jax.ffi.ffi_call(
-        "cholmodjax_logdet_f64",
-        jax.ShapeDtypeStruct((), jnp.float64),
-        vmap_method="sequential",
-    )
-    return call(Ai, Aj, Ax, n=np.int64(n))
+    n = int(n)
+
+    # AD: log|A| depends on Ax only through A. d log|A| = tr(A^{-1} dA), and for
+    # a stored upper-triangle value at (i, j) that sets both A_ij and A_ji the
+    # sensitivity is (A^{-1})_ij + (A^{-1})_ji = 2 (A^{-1})_ij; a diagonal value
+    # contributes (A^{-1})_ii once; ignored lower-triangle entries get zero.
+    @jax.custom_vjp
+    def _logdet_a(Ax):
+        return _logdet_ffi(Ai, Aj, Ax, n)
+
+    def _fwd(Ax):
+        return _logdet_ffi(Ai, Aj, Ax, n), Ax
+
+    def _bwd(Ax_saved, g):
+        z = _selinv_ffi(Ai, Aj, Ax_saved, n)
+        dAx = g * jnp.where(Ai == Aj, z, jnp.where(Ai < Aj, 2.0 * z, 0.0))
+        return (dAx,)
+
+    _logdet_a.defvjp(_fwd, _bwd)
+    return _logdet_a(Ax)
 
 
 # factor_solve dispatchers, cached by (mode_chain, chain_lens, want_logdet, n).
