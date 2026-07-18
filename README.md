@@ -122,8 +122,8 @@ grad_Ax = jax.grad(neg_log_post)(Ax)                   # works under jit / vmap
 ```
 
 `logdet`'s reverse-mode rule uses that `d log|A| / dA = A^{-1}`, evaluated **only
-at `A`'s sparsity pattern** by [Takahashi's selected-inversion
-recurrence](https://doi.org/10.1109/TPAS.1973.293720) over the Cholesky factor —
+at `A`'s sparsity pattern** by Takahashi's selected-inversion
+recurrence over the Cholesky factor —
 never the dense inverse. That quantity is exposed directly:
 
 ```python
