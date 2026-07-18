@@ -6,7 +6,6 @@ dependencies:
   - pip
   - scipy
   - numpy
-  - jax
   - scikit-sparse
   - nanobind
   - suitesparse
@@ -15,6 +14,9 @@ dependencies:
   - pytest
   - cxx-compiler
   - pytensor
+  - pip
+  - pip:
+    - jax  # force jax from pip so windows has an installer
   # testing
   - jupyter
   - pytest
