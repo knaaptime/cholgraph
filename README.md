@@ -4,7 +4,7 @@
 
 # cholgraph
 
-JAX-native sparse Cholesky via [CHOLMOD](https://github.com/DrTimothyAldenDavis/SuiteSparse).
+JAX & PyTensor -native sparse Cholesky via [CHOLMOD](https://github.com/DrTimothyAldenDavis/SuiteSparse).
 Solves with symmetric positive definite sparse matrices run at full native speed
 **inside `@jax.jit`** (and `lax.scan` / `lax.fori_loop`) — no Python callback overhead.
 
