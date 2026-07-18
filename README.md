@@ -1,3 +1,7 @@
+[![Continuous Integration](https://github.com/knaaptime/cholgraph/actions/workflows/unittests.yml/badge.svg)](https://github.com/knaaptime/cholgraph/actions/workflows/unittests.yml)
+[![codecov](https://codecov.io/gh/knaaptime/cholgraph/branch/main/graph/badge.svg)](https://codecov.io/gh/knaaptime/cholgraph)
+
+
 # cholgraph
 
 JAX-native sparse Cholesky via [CHOLMOD](https://github.com/DrTimothyAldenDavis/SuiteSparse).
@@ -251,6 +255,3 @@ CHOLMOD choose based on the matrix.
 - [ ] Autodiff rule for `factor_solve` (currently forward-only)
 - [ ] Wheels / conda-forge packaging
 
-## License
-
-MIT
