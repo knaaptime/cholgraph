@@ -1,0 +1,173 @@
+name: Build and publish to PyPI
+
+on:
+  push:
+    tags:
+      - "v*"       # v1.2.3 → PyPI, v1.2.3a1/b1/rc1 → TestPyPI
+  workflow_dispatch:
+
+jobs:
+  build_wheels:
+    name: Build wheels on ${{ matrix.os }}
+    permissions:
+      id-token: write   # MANDATORY for trusted publishing to PyPI
+      contents: write   # MANDATORY for the GitHub release action
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux x86_64 — manylinux via cibuildwheel's default container
+          - os: ubuntu-latest
+            arch: x86_64
+
+          # Linux aarch64 — emulated via QEMU
+          - os: ubuntu-latest
+            arch: aarch64
+
+          # macOS Intel (x86_64)
+          - os: macos-13
+            arch: x86_64
+            macosx_deployment_target: "13.0"
+
+          # macOS Apple Silicon (arm64)
+          - os: macos-latest
+            arch: arm64
+            macosx_deployment_target: "15.0"
+
+          # Windows x86_64
+          - os: windows-latest
+            arch: AMD64
+
+    runs-on: ${{ matrix.os }}
+
+    env:
+      CIBW_BUILD: "cp311-* cp312-* cp313-* cp314-*"
+      CIBW_ARCHS: ${{ matrix.arch }}
+      CIBW_BUILD_VERBOSITY: 1
+      # Match Homebrew libomp's minimum OS target so delocate can bundle it.
+      MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macosx_deployment_target }}
+
+      # ── Linux ──────────────────────────────────────────────────────────────
+      # Install OpenMP inside the manylinux container before building.
+      # The shared lib ends up bundled into the wheel by auditwheel automatically.
+      CIBW_BEFORE_BUILD_LINUX: >
+        yum install -y libgomp || apt-get install -y libgomp1 || true
+
+      # ── macOS ──────────────────────────────────────────────────────────────
+      # 1. Install libomp via Homebrew so the compiler can find it.
+      # 2. Point the compiler and linker at it explicitly so delocate can see
+      #    the dylib at a known Homebrew prefix and bundle it into the wheel.
+      CIBW_BEFORE_BUILD_MACOS: >
+        brew install libomp
+      CIBW_ENVIRONMENT_MACOS: >
+        CC=clang
+        CXX=clang++
+        LDFLAGS="-L$(brew --prefix libomp)/lib"
+        CPPFLAGS="-I$(brew --prefix libomp)/include"
+        DYLD_LIBRARY_PATH="$(brew --prefix libomp)/lib"
+
+      # Force delocate to bundle libomp into the wheel so it is self-contained.
+      CIBW_REPAIR_WHEEL_COMMAND_MACOS: >
+        delocate-wheel --require-archs {delocate_archs} -w {dest_dir} -v {wheel}
+
+      # ── Windows ────────────────────────────────────────────────────────────
+      # MSVC ships its own OpenMP runtime (vcomp); nothing extra needed.
+      # delvewheel bundles the runtime DLLs automatically.
+      CIBW_BEFORE_BUILD_WINDOWS: >
+        pip install delvewheel
+      CIBW_REPAIR_WHEEL_COMMAND_WINDOWS: >
+        delvewheel repair -w {dest_dir} {wheel}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      # Enable QEMU for Linux aarch64 cross-compilation.
+      - name: Set up QEMU (Linux aarch64 only)
+        if: matrix.os == 'ubuntu-latest' && matrix.arch == 'aarch64'
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@v2.21
+        with:
+          output-dir: wheelhouse
+
+      - name: Upload wheel artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}-${{ matrix.arch }}
+          path: wheelhouse/*.whl
+
+  build_sdist:
+    name: Build source distribution
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build sdist
+        run: |
+          pip install build
+          python -m build --sdist --outdir wheelhouse
+
+      - name: Upload sdist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: wheelhouse/*.tar.gz
+
+  publish:
+    name: Publish to PyPI and create release
+    needs: [build_wheels, build_sdist]
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: write
+    # Runs on any tag. test-* tags build+artifact only (no publish step fires).
+    if: startsWith(github.ref, 'refs/tags/')
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      # v1.2.3a1 / v1.2.3b2 / v1.2.3rc1 → TestPyPI
+      - name: Publish pre-release to TestPyPI
+        if: |
+          startsWith(github.ref_name, 'v') &&
+          (contains(github.ref_name, 'a') || contains(github.ref_name, 'b') || contains(github.ref_name, 'rc'))
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          packages-dir: dist/
+
+      # v1.2.3 (clean) → real PyPI
+      - name: Publish release to PyPI
+        if: |
+          startsWith(github.ref_name, 'v') &&
+          !contains(github.ref_name, 'a') &&
+          !contains(github.ref_name, 'b') &&
+          !contains(github.ref_name, 'rc')
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+
+      # GitHub Release for any v* tag; marked pre-release when applicable
+      - name: Create GitHub Release
+        if: startsWith(github.ref_name, 'v')
+        uses: softprops/action-gh-release@v2
+        with:
+          prerelease: ${{ contains(github.ref_name, 'a') || contains(github.ref_name, 'b') || contains(github.ref_name, 'rc') }}
+          files: dist/*
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

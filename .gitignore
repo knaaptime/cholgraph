@@ -5,6 +5,7 @@ __pycache__/
 # C extensions
 *.so
 notebooks/cache
+**.DS_Store
 
 # Distribution / packaging
 .Python
