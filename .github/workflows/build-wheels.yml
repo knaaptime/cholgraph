@@ -49,11 +49,19 @@ jobs:
       CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
       CIBW_MANYLINUX_AARCH64_IMAGE: manylinux_2_28
       # CHOLMOD (from SuiteSparse) isn't preinstalled in the manylinux
-      # container either. Installs to standard system paths (/usr/include,
-      # /usr/lib64), so no CMAKE_PREFIX_PATH override needed here.
+      # container either; manylinux_2_28 has PowerTools enabled by default,
+      # so plain yum/dnf install works, no EPEL/CRB needed. However the RPM
+      # installs headers to /usr/include/suitesparse/ (not /usr/include/
+      # directly), and the project's CMakeLists.txt only guesses that
+      # subdirectory under CHOLMOD_PREFIX, which defaults to the Python venv
+      # path (wrong) rather than /usr when unset. Pass CHOLMOD_PREFIX=/usr
+      # explicitly via scikit-build-core's CMake-args env var so it lands as
+      # an actual CMake variable regardless of how the project reads it.
       CIBW_BEFORE_BUILD_LINUX: >
         (yum install -y suitesparse-devel || dnf install -y suitesparse-devel || apt-get install -y libsuitesparse-dev || true) &&
         pip install jax
+      CIBW_ENVIRONMENT_LINUX: >
+        SKBUILD_CMAKE_ARGS="-DCHOLMOD_PREFIX=/usr"
 
       # ── macOS ──────────────────────────────────────────────────────────────
       # CHOLMOD (from SuiteSparse) isn't preinstalled on the macOS runner
@@ -63,8 +71,7 @@ jobs:
         brew install suitesparse &&
         pip install jax
       CIBW_ENVIRONMENT_MACOS: >
-        CHOLMOD_PREFIX="$(brew --prefix suitesparse)"
-        CMAKE_PREFIX_PATH="$(brew --prefix suitesparse)"
+        SKBUILD_CMAKE_ARGS="-DCHOLMOD_PREFIX=$(brew --prefix suitesparse);-DCMAKE_PREFIX_PATH=$(brew --prefix suitesparse)"
 
       # ── Windows ────────────────────────────────────────────────────────────
       # CHOLMOD (from SuiteSparse) isn't preinstalled here either. vcpkg
