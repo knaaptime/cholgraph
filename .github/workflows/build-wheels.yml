@@ -40,6 +40,11 @@ jobs:
     runs-on: ${{ matrix.os }}
     env:
       CIBW_BUILD: "cp311-* cp312-* cp313-* cp314-*"
+      # jaxlib (needed at build time for XLA FFI headers) has no musllinux
+      # wheels published at all -- only manylinux, macOS, and Windows. That's
+      # an upstream gap, not something fixable from this workflow, so skip
+      # musllinux targets entirely rather than let every build fail on it.
+      CIBW_SKIP: "*-musllinux*"
       CIBW_ARCHS: ${{ matrix.arch }}
       CIBW_BUILD_VERBOSITY: 1
       MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macosx_deployment_target }}
