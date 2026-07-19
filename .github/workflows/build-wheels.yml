@@ -40,10 +40,28 @@ jobs:
       CIBW_BUILD_VERBOSITY: 1
       MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macosx_deployment_target }}
 
+      # ── Linux ──────────────────────────────────────────────────────────────
+      # CHOLMOD (from SuiteSparse) isn't preinstalled in the manylinux
+      # container either. Installs to standard system paths (/usr/include,
+      # /usr/lib64), so no CMAKE_PREFIX_PATH override needed here.
+      CIBW_BEFORE_BUILD_LINUX: >
+        (yum install -y suitesparse-devel || apt-get install -y libsuitesparse-dev || true) &&
+        pip install jax
+
+      # ── macOS ──────────────────────────────────────────────────────────────
+      # CHOLMOD (from SuiteSparse) isn't preinstalled on the macOS runner
+      # images, so CMake can't find it. Install it via Homebrew and point
+      # CMake at the Homebrew prefix so configure can locate it.
+      CIBW_BEFORE_BUILD_MACOS: >
+        brew install suitesparse &&
+        pip install jax
+      CIBW_ENVIRONMENT_MACOS: >
+        CMAKE_PREFIX_PATH="$(brew --prefix suitesparse)"
+
       # ── Windows ────────────────────────────────────────────────────────────
       # delvewheel bundles any runtime DLLs automatically.
       CIBW_BEFORE_BUILD_WINDOWS: >
-        pip install delvewheel
+        pip install delvewheel jax
       CIBW_REPAIR_WHEEL_COMMAND_WINDOWS: >
         delvewheel repair -w {dest_dir} {wheel}
 
