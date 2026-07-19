@@ -34,8 +34,12 @@ jobs:
           - os: macos-15
             arch: arm64
             macosx_deployment_target: "15.0"
-          # Windows x86_64
-          - os: windows-latest
+          # Windows x86_64 -- pinned rather than windows-latest, since
+          # windows-latest now resolves to a windows-2025-vs2026 preview
+          # image whose bundled flang compiler fails to compile reference
+          # LAPACK's Fortran source (a compiler bug, not fixable here).
+          # Bump this pin deliberately once VS2026/flang has matured.
+          - os: windows-2022
             arch: AMD64
     runs-on: ${{ matrix.os }}
     env:
