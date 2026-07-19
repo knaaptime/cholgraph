@@ -84,10 +84,16 @@ jobs:
 
       # ── Windows ────────────────────────────────────────────────────────────
       # CHOLMOD (from SuiteSparse) isn't preinstalled here either. vcpkg
-      # ships preinstalled on GitHub-hosted Windows runners, so use it.
+      # ships preinstalled on GitHub-hosted Windows runners, so use it. The
+      # umbrella `suitesparse` port only pulls in CHOLMOD's core+partition
+      # features by default -- explicitly request the other CHOLMOD modules
+      # cholgraph needs (Modify for cholmod_updown, plus Cholesky/Supernodal/
+      # MatrixOps for factorization) since vcpkg builds them as opt-in
+      # features rather than compiling everything unconditionally the way
+      # apt/Homebrew's suitesparse packages do.
       CIBW_BEFORE_BUILD_WINDOWS: >
         pip install delvewheel jax &&
-        vcpkg install suitesparse:x64-windows
+        vcpkg install suitesparse:x64-windows "suitesparse-cholmod[core,cholesky,matrixops,modify,partition,supernodal]:x64-windows"
       CIBW_ENVIRONMENT_WINDOWS: >
         CMAKE_PREFIX_PATH="C:/vcpkg/installed/x64-windows"
       # --add-path tells delvewheel where to find the CHOLMOD DLLs to bundle,
