@@ -41,11 +41,18 @@ jobs:
       MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macosx_deployment_target }}
 
       # ── Linux ──────────────────────────────────────────────────────────────
+      # The default manylinux2014 image is too old: jaxlib and scipy no
+      # longer publish wheels for it, which forced pip to backtrack to
+      # ancient jax versions and eventually build scipy from source (which
+      # then failed on a missing OpenBLAS). Use manylinux_2_28 instead, which
+      # is current enough for modern prebuilt wheels of everything involved.
+      CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
+      CIBW_MANYLINUX_AARCH64_IMAGE: manylinux_2_28
       # CHOLMOD (from SuiteSparse) isn't preinstalled in the manylinux
       # container either. Installs to standard system paths (/usr/include,
       # /usr/lib64), so no CMAKE_PREFIX_PATH override needed here.
       CIBW_BEFORE_BUILD_LINUX: >
-        (yum install -y suitesparse-devel || apt-get install -y libsuitesparse-dev || true) &&
+        (yum install -y suitesparse-devel || dnf install -y suitesparse-devel || apt-get install -y libsuitesparse-dev || true) &&
         pip install jax
 
       # ── macOS ──────────────────────────────────────────────────────────────
@@ -56,14 +63,21 @@ jobs:
         brew install suitesparse &&
         pip install jax
       CIBW_ENVIRONMENT_MACOS: >
+        CHOLMOD_PREFIX="$(brew --prefix suitesparse)"
         CMAKE_PREFIX_PATH="$(brew --prefix suitesparse)"
 
       # ── Windows ────────────────────────────────────────────────────────────
-      # delvewheel bundles any runtime DLLs automatically.
+      # CHOLMOD (from SuiteSparse) isn't preinstalled here either. vcpkg
+      # ships preinstalled on GitHub-hosted Windows runners, so use it.
       CIBW_BEFORE_BUILD_WINDOWS: >
-        pip install delvewheel jax
+        pip install delvewheel jax &&
+        vcpkg install suitesparse:x64-windows
+      CIBW_ENVIRONMENT_WINDOWS: >
+        CMAKE_PREFIX_PATH="C:/vcpkg/installed/x64-windows"
+      # --add-path tells delvewheel where to find the CHOLMOD DLLs to bundle,
+      # since the vcpkg bin dir isn't on PATH by default.
       CIBW_REPAIR_WHEEL_COMMAND_WINDOWS: >
-        delvewheel repair -w {dest_dir} {wheel}
+        delvewheel repair -w {dest_dir} --add-path C:\vcpkg\installed\x64-windows\bin {wheel}
 
     steps:
       - uses: actions/checkout@v6
