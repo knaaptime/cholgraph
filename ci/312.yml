@@ -16,7 +16,7 @@ dependencies:
   - pytensor
   - pip
   - pip:
-    - jax  # force jax from pip so windows has an installer
+    - jax >=0.9.0 # force jax from pip so windows has an installer
   # testing
   - jupyter
   - pytest
@@ -24,4 +24,3 @@ dependencies:
   - pytest-xdist
   - codecov
   - coverage
-

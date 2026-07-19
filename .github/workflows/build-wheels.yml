@@ -26,8 +26,12 @@ jobs:
           - os: macos-13
             arch: x86_64
             macosx_deployment_target: "13.0"
-          # macOS Apple Silicon (arm64)
-          - os: macos-latest
+          # macOS Apple Silicon (arm64) -- pinned rather than macos-latest,
+          # since macos-latest now resolves to macOS 26 (Tahoe) and
+          # Homebrew's bottles for that host embed a minimum target of 26.0,
+          # which would make the wheel unusable on any older macOS. Bump
+          # this pin (and the target below) deliberately, not automatically.
+          - os: macos-15
             arch: arm64
             macosx_deployment_target: "15.0"
           # Windows x86_64
