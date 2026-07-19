@@ -22,10 +22,6 @@ jobs:
           # Linux aarch64 — emulated via QEMU
           - os: ubuntu-latest
             arch: aarch64
-          # macOS Intel (x86_64)
-          - os: macos-13
-            arch: x86_64
-            macosx_deployment_target: "13.0"
           # macOS Apple Silicon (arm64) -- pinned rather than macos-latest,
           # since macos-latest now resolves to macOS 26 (Tahoe) and
           # Homebrew's bottles for that host embed a minimum target of 26.0,
